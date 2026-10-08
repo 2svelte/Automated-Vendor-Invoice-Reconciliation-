@@ -149,6 +149,7 @@ activemq-data/
 
 # Environments
 .env
+.streamlit/secrets.toml
 .envrc
 .venv
 env/

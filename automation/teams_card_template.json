@@ -1,0 +1,19 @@
+{
+  "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+  "type": "AdaptiveCard",
+  "version": "1.5",
+  "body": [
+    {"type": "TextBlock", "text": "Freight invoice discrepancy", "weight": "Bolder", "size": "Medium"},
+    {"type": "FactSet", "facts": [
+      {"title": "Carrier", "value": "${carrier_name}"},
+      {"title": "Invoice / PO", "value": "${invoice_number} / ${po_number}"},
+      {"title": "Overcharge", "value": "${total_overbill}"},
+      {"title": "Variance", "value": "${variance_pct}"}
+    ]},
+    {"type": "TextBlock", "text": "Review the reconciliation before approving or disputing this charge.", "wrap": true}
+  ],
+  "actions": [
+    {"type": "Action.Submit", "title": "Approve Overcharge", "data": {"action": "approve_overcharge", "invoice_number": "${invoice_number}"}},
+    {"type": "Action.Submit", "title": "Send AI Dispute", "data": {"action": "send_ai_dispute", "invoice_number": "${invoice_number}"}}
+  ]
+}

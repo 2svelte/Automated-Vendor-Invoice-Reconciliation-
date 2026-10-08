@@ -1,0 +1,33 @@
+{
+  "name": "Automated Freight Invoice Reconciliation",
+  "version": "1.0",
+  "purpose": "Ingest carrier invoices, run deterministic reconciliation, and route material exceptions for human review.",
+  "trigger": {
+    "type": "outlook_new_email_with_attachment",
+    "mailbox": "shared-freight-invoices@contoso.example",
+    "accepted_extensions": [".pdf", ".csv"],
+    "save_directory": "inbox_drop/",
+    "local_demo_watch": "inbox_drop/*.csv",
+    "canonical_invoice_path": "data/carrier_invoices_raw.csv"
+  },
+  "actions": [
+    {"name": "extract_invoice_attachment", "connector": "Office365 Outlook"},
+    {"name": "normalize_invoice_data", "implementation": "Python ETL or Power Query"},
+    {"name": "run_three_way_reconciliation", "implementation": "src/reconciliation_engine.py"},
+    {"name": "write_audit_log", "target": "data/reconciled_audit_log.csv"}
+  ],
+  "exception_route": {
+    "condition": "status == 'DISCREPANCY_FLAGGED' or status == 'REVIEW_INCOMPLETE' or variance_pct > 0.05",
+    "queue_path": "automation/discrepancy_queue.json",
+    "queue_format": "JSON array of exception objects",
+    "local_desktop_trigger": "Wait for file creation",
+    "cloud_trigger": "OneDrive or SharePoint file created",
+    "notification": "Microsoft Teams Adaptive Card",
+    "template": "automation/teams_card_template.json",
+    "recipient": "Logistics Manager"
+  },
+  "approval_branches": {
+    "approve_overcharge": {"actions": ["record_manager_approval", "release_invoice_to_ap"], "audit_required": true},
+    "send_ai_dispute": {"actions": ["request_dispute_draft", "send_for_procurement_review", "record_credit_memo_request"], "audit_required": true}
+  }
+}

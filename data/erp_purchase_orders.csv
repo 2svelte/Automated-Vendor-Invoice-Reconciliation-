@@ -1,0 +1,13 @@
+po_number,vendor_id,carrier_name,origin,destination,contracted_base_freight,agreed_fuel_surcharge,max_accessorial_allowance
+PO-1001,V-101,Northstar Freight,"Chicago, IL","Columbus, OH",2450.0,220.5,75.0
+PO-1002,V-102,BlueLine Logistics,"Dallas, TX","Phoenix, AZ",3100.0,310.0,100.0
+PO-1003,V-103,Atlas Haulage,"Atlanta, GA","Nashville, TN",1850.0,166.5,60.0
+PO-1004,V-104,Northstar Freight,"Seattle, WA","Portland, OR",1280.0,115.2,50.0
+PO-1005,V-105,BlueLine Logistics,"Newark, NJ","Boston, MA",2200.0,198.0,80.0
+PO-1006,V-106,Atlas Haulage,"Memphis, TN","St. Louis, MO",1640.0,147.6,60.0
+PO-1007,V-107,Northstar Freight,"Denver, CO","Salt Lake City, UT",2750.0,247.5,90.0
+PO-1008,V-108,BlueLine Logistics,"Los Angeles, CA","Las Vegas, NV",1460.0,131.4,55.0
+PO-1009,V-109,Atlas Haulage,"Kansas City, MO","Omaha, NE",1180.0,106.2,45.0
+PO-1010,V-110,Northstar Freight,"Cleveland, OH","Pittsburgh, PA",1325.0,119.25,50.0
+PO-1011,V-111,BlueLine Logistics,"Miami, FL","Orlando, FL",980.0,88.2,40.0
+PO-1012,V-112,Atlas Haulage,"Minneapolis, MN","Madison, WI",1090.0,98.1,45.0

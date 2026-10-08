@@ -1,0 +1,53 @@
+[
+  {
+    "invoice_number": "INV-1004",
+    "po_number": "PO-1004",
+    "carrier_name": "Northstar Freight",
+    "status": "DISCREPANCY_FLAGGED",
+    "total_overbill": 100.0,
+    "variance_pct": 0.069195,
+    "base_variance": 0.0,
+    "fuel_variance": 0.0,
+    "accessorial_variance": 100.0,
+    "weight_variance_lbs": 0.0,
+    "receipt_found": true,
+    "actions": [
+      "approve_overcharge",
+      "send_ai_dispute"
+    ]
+  },
+  {
+    "invoice_number": "INV-1007",
+    "po_number": "PO-1007",
+    "carrier_name": "Northstar Freight",
+    "status": "DISCREPANCY_FLAGGED",
+    "total_overbill": 557.5,
+    "variance_pct": 0.180567,
+    "base_variance": 430.0,
+    "fuel_variance": 37.5,
+    "accessorial_variance": 90.0,
+    "weight_variance_lbs": 720.0,
+    "receipt_found": true,
+    "actions": [
+      "approve_overcharge",
+      "send_ai_dispute"
+    ]
+  },
+  {
+    "invoice_number": "INV-1012",
+    "po_number": "PO-1012",
+    "carrier_name": "Atlas Haulage",
+    "status": "REVIEW_INCOMPLETE",
+    "total_overbill": 0.0,
+    "variance_pct": 0.0,
+    "base_variance": 0.0,
+    "fuel_variance": 0.0,
+    "accessorial_variance": 0.0,
+    "weight_variance_lbs": 0.0,
+    "receipt_found": false,
+    "actions": [
+      "approve_overcharge",
+      "send_ai_dispute"
+    ]
+  }
+]
