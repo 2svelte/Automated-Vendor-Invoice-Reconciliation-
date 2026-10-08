@@ -19,7 +19,13 @@ Open the local Streamlit URL printed by the command. Configure Supabase as descr
 
 The schema is tracked in `supabase/migrations/`. After `supabase init` and `supabase link --project-ref <project-ref>`, preview and apply migrations with `supabase db push --dry-run` and `supabase db push`. Set `SUPABASE_URL` and `SUPABASE_KEY` in the repo-root `.env` file for the app. Install dependencies with `python -m pip install -r requirements.txt`.
 
-The first migration creates `carrier_invoices` and `internal_dispatches`. The next adds `purchase_orders` and `warehouse_goods_receipts`, and adds the canonical invoice columns used by the three-way engine. Before running the dashboard, ensure the purchase order and receipt tables are populated in Supabase from your ERP and warehouse sources.
+The first migration creates `carrier_invoices` and `internal_dispatches`. The next adds `purchase_orders` and `warehouse_goods_receipts`, and adds the canonical invoice columns used by the three-way engine. For a one-time demo seed from the included CSV fixtures, run:
+
+```powershell
+py -3.10 -m src.seed_supabase
+```
+
+This idempotently upserts the included PO, invoice, and receipt records into Supabase. The CSVs are not read by the dashboard at runtime; production PO and receipt data should be populated from their source systems.
 
 Power Automate Desktop is the invoice ingestion trigger. After it saves an attachment to `data/inbound_outlook_invoices`, run this command from the repository root to parse the PDFs and upsert them into `carrier_invoices`:
 
