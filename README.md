@@ -18,7 +18,7 @@ Open the local Streamlit URL printed by the command. Configure Supabase as descr
 
 ## Supabase setup
 
-Run the DDL in `automation/supabase_schema.sql` in the Supabase SQL Editor. Set `SUPABASE_URL` and `SUPABASE_KEY` in the process environment or a local `.env` file. Install dependencies with `python -m pip install -r requirements.txt`.
+The existing schema is tracked as the CLI migration `supabase/migrations/20261008000000_supabase_schema.sql`; no separate `create_invoice_tables` migration is needed. After `supabase init` and `supabase link --project-ref <project-ref>`, preview and apply it with `supabase db push --dry-run` and `supabase db push`. Set `SUPABASE_URL` and `SUPABASE_KEY` in the process environment or a local `.env` file for the app. Install dependencies with `python -m pip install -r requirements.txt`.
 
 Power Automate Desktop can trigger PDF ingestion with this exact command:
 
