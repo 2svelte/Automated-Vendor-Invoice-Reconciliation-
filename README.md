@@ -10,7 +10,6 @@ Requires Python 3.10 or newer.
 py -3.10 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
-python -m src.data_generator
 streamlit run app.py
 ```
 
@@ -20,29 +19,21 @@ Open the local Streamlit URL printed by the command. Configure Supabase as descr
 
 The schema is tracked in `supabase/migrations/`. After `supabase init` and `supabase link --project-ref <project-ref>`, preview and apply migrations with `supabase db push --dry-run` and `supabase db push`. Set `SUPABASE_URL` and `SUPABASE_KEY` in the repo-root `.env` file for the app. Install dependencies with `python -m pip install -r requirements.txt`.
 
-The first migration creates `carrier_invoices` and `internal_dispatches`. The next adds `purchase_orders` and `warehouse_goods_receipts`, and adds the canonical invoice columns used by the three-way engine. After pushing migrations, load the existing reference CSVs once:
+The first migration creates `carrier_invoices` and `internal_dispatches`. The next adds `purchase_orders` and `warehouse_goods_receipts`, and adds the canonical invoice columns used by the three-way engine. Before running the dashboard, ensure the purchase order and receipt tables are populated in Supabase from your ERP and warehouse sources.
 
-```powershell
-py -3.10 -m src.sync_reference_data
-```
-
-The command upserts `data/erp_purchase_orders.csv` into `purchase_orders` and `data/warehouse_goods_receipts.csv` into `warehouse_goods_receipts`. New PO or receipt data can be synced by running it again.
-
-When Streamlit is running, a local folder watcher monitors `data/inbound_outlook_invoices`. Put or move completed invoice PDFs into that folder; the existing PDF parser extracts their data and upserts it into `carrier_invoices` by invoice ID. The dashboard then runs the three-way engine against the Supabase PO, invoice, and receipt tables when it refreshes. The watcher also processes PDFs already present when the app starts.
-
-Power Automate Desktop can also trigger a one-time scan of the inbound folder with this command:
+Power Automate Desktop is the invoice ingestion trigger. After it saves an attachment to `data/inbound_outlook_invoices`, run this command from the repository root to parse the PDFs and upsert them into `carrier_invoices`:
 
 ```powershell
 py -3.10 -c "from src.extractor import sync_inbound_pdfs_to_supabase; sync_inbound_pdfs_to_supabase('data/inbound_outlook_invoices')"
 ```
 
-The extractor maps the invoice's associated PO to `po_number` and upserts by `invoice_id`. The source invoice format provides accessorial fees as one aggregate amount, so the dashboard reports the unapproved amount without assuming a fee type.
+The command scans every PDF in the folder each time it runs; upserts use `invoice_id`, so rerunning it updates existing invoices rather than creating duplicate rows. The dashboard only reads Supabase and refreshes the three-way reconciliation every 15 seconds. The source invoice format provides accessorial fees as one aggregate amount, so the dashboard reports the unapproved amount without assuming a fee type.
 
 For live OpenAI dispute drafting, copy `.streamlit/secrets.toml.example` to `.streamlit/secrets.toml` and add your own `OPENAI_API_KEY`. The app reads that Streamlit secret at draft time. Without a key, the console produces a clearly labeled deterministic draft using only reconciliation facts. Never commit a real API key, including to the example file.
 
 ## Legacy CSV fixtures
 
-The CSVs remain the source for bootstrapping local PO and receipt records and for tests. At runtime, the Streamlit dashboard reads purchase orders, invoices, and warehouse receipts from Supabase and passes those frames to the deterministic three-way reconciliation engine.
+The CSV files are not used by the live dashboard. They remain as historical examples and local test fixtures; the running app reads purchase orders, invoices, and warehouse receipts from Supabase and passes those frames to the deterministic three-way reconciliation engine.
 
 - `data/erp_purchase_orders.csv`: `po_number`, vendor and route identifiers, contracted base freight, agreed fuel surcharge, and maximum authorized accessorial allowance.
 - `data/carrier_invoices_raw.csv`: invoice and PO identifiers, billed base freight, billed fuel surcharge, billed accessorial fee, billed weight, and invoice date.

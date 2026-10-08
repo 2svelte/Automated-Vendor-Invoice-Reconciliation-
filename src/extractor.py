@@ -120,15 +120,6 @@ def _create_supabase_client():
     return create_client(supabase_url, supabase_key)
 
 
-def sync_pdf_to_supabase(pdf_path: str | os.PathLike[str]) -> dict[str, object]:
-    """Parse and upsert one invoice PDF into Supabase."""
-    path = Path(pdf_path)
-    record = parse_supabase_invoice_pdf(path)
-    client = _create_supabase_client()
-    client.table("carrier_invoices").upsert([record], on_conflict="invoice_id").execute()
-    return {"invoice_id": record["invoice_id"], "file": path.name}
-
-
 def sync_inbound_pdfs_to_supabase(inbound_dir: str) -> dict[str, object]:
     """Extract inbound PDFs and upsert them into Supabase by invoice ID."""
     source_dir = Path(inbound_dir)

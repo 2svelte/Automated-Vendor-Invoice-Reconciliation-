@@ -72,29 +72,3 @@ def reconcile_supabase_data(client) -> pd.DataFrame:
     return reconcile(*load_reconciliation_sources(client))
 
 
-def _upsert_csv(client, table_name: str, path: Path, conflict_column: str) -> int:
-    if not path.is_file():
-        raise FileNotFoundError(f"Reference data file not found: {path}")
-    frame = pd.read_csv(path)
-    records = frame.astype(object).where(pd.notna(frame), None).to_dict(orient="records")
-    for start in range(0, len(records), 500):
-        client.table(table_name).upsert(
-            records[start : start + 500], on_conflict=conflict_column
-        ).execute()
-    return len(records)
-
-
-def sync_reference_data_to_supabase(
-    client,
-    purchase_orders_path: str | Path = PROJECT_ROOT / "data" / "erp_purchase_orders.csv",
-    receipts_path: str | Path = PROJECT_ROOT / "data" / "warehouse_goods_receipts.csv",
-) -> dict[str, int]:
-    """Upsert local PO and receipt source CSVs into their Supabase tables."""
-    return {
-        "purchase_orders": _upsert_csv(
-            client, "purchase_orders", Path(purchase_orders_path), "po_number"
-        ),
-        "warehouse_goods_receipts": _upsert_csv(
-            client, "warehouse_goods_receipts", Path(receipts_path), "po_number"
-        ),
-    }

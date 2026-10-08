@@ -26,15 +26,6 @@ def get_supabase_client():
     return create_supabase_client()
 
 
-@st.cache_resource
-def start_invoice_watcher():
-    from src.inbound_watcher import start_inbound_watcher
-
-    return start_inbound_watcher(
-        PROJECT_ROOT / "data" / "inbound_outlook_invoices"
-    )
-
-
 def highlight_discrepancies(frame: pd.DataFrame):
     def row_style(row: pd.Series) -> list[str]:
         if row["status"] in {DISCREPANCY_FLAGGED, REVIEW_INCOMPLETE}:
@@ -52,9 +43,7 @@ st.set_page_config(page_title="Freight Audit", page_icon="FA", layout="wide")
 st.title("Freight Invoice Audit")
 st.caption("Purchase orders, carrier invoices, and warehouse receipts reconciled from Supabase")
 
-start_invoice_watcher()
 with st.sidebar:
-    st.caption("Watching `data/inbound_outlook_invoices` for new PDFs")
     st.button("Refresh Supabase data", type="primary", use_container_width=True)
 
 @st.fragment(run_every="15s")
