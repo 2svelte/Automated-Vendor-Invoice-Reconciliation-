@@ -88,13 +88,20 @@ def parse_supabase_invoice_pdf(pdf_path: str | os.PathLike[str]) -> dict[str, ob
     parsed = parse_carrier_pdf(pdf_path)
     return {
         "invoice_id": parsed["invoice_number"],
+        "invoice_number": parsed["invoice_number"],
         "carrier_name": parsed["carrier_name"],
         "issue_date": parsed["invoice_date"],
+        "invoice_date": parsed["invoice_date"],
         "shipment_id": parsed["po_number"],
+        "po_number": parsed["po_number"],
         "billed_weight": parsed["billed_weight_lbs"],
+        "billed_weight_lbs": parsed["billed_weight_lbs"],
         "base_rate": parsed["billed_base_freight"],
+        "billed_base_freight": parsed["billed_base_freight"],
         "fuel_surcharge": parsed["billed_fuel_surcharge"],
+        "billed_fuel_surcharge": parsed["billed_fuel_surcharge"],
         "accessorial_fees": parsed["billed_accessorial_fee"],
+        "billed_accessorial_fee": parsed["billed_accessorial_fee"],
     }
 
 
@@ -111,6 +118,15 @@ def _create_supabase_client():
     from supabase import create_client
 
     return create_client(supabase_url, supabase_key)
+
+
+def sync_pdf_to_supabase(pdf_path: str | os.PathLike[str]) -> dict[str, object]:
+    """Parse and upsert one invoice PDF into Supabase."""
+    path = Path(pdf_path)
+    record = parse_supabase_invoice_pdf(path)
+    client = _create_supabase_client()
+    client.table("carrier_invoices").upsert([record], on_conflict="invoice_id").execute()
+    return {"invoice_id": record["invoice_id"], "file": path.name}
 
 
 def sync_inbound_pdfs_to_supabase(inbound_dir: str) -> dict[str, object]:

@@ -18,21 +18,31 @@ Open the local Streamlit URL printed by the command. Configure Supabase as descr
 
 ## Supabase setup
 
-The existing schema is tracked as the CLI migration `supabase/migrations/20261008000000_supabase_schema.sql`; no separate `create_invoice_tables` migration is needed. After `supabase init` and `supabase link --project-ref <project-ref>`, preview and apply it with `supabase db push --dry-run` and `supabase db push`. Set `SUPABASE_URL` and `SUPABASE_KEY` in the process environment or a local `.env` file for the app. Install dependencies with `python -m pip install -r requirements.txt`.
+The schema is tracked in `supabase/migrations/`. After `supabase init` and `supabase link --project-ref <project-ref>`, preview and apply migrations with `supabase db push --dry-run` and `supabase db push`. Set `SUPABASE_URL` and `SUPABASE_KEY` in the repo-root `.env` file for the app. Install dependencies with `python -m pip install -r requirements.txt`.
 
-Power Automate Desktop can trigger PDF ingestion with this exact command:
+The first migration creates `carrier_invoices` and `internal_dispatches`. The next adds `purchase_orders` and `warehouse_goods_receipts`, and adds the canonical invoice columns used by the three-way engine. After pushing migrations, load the existing reference CSVs once:
+
+```powershell
+py -3.10 -m src.sync_reference_data
+```
+
+The command upserts `data/erp_purchase_orders.csv` into `purchase_orders` and `data/warehouse_goods_receipts.csv` into `warehouse_goods_receipts`. New PO or receipt data can be synced by running it again.
+
+When Streamlit is running, a local folder watcher monitors `data/inbound_outlook_invoices`. Put or move completed invoice PDFs into that folder; the existing PDF parser extracts their data and upserts it into `carrier_invoices` by invoice ID. The dashboard then runs the three-way engine against the Supabase PO, invoice, and receipt tables when it refreshes. The watcher also processes PDFs already present when the app starts.
+
+Power Automate Desktop can also trigger a one-time scan of the inbound folder with this command:
 
 ```powershell
 py -3.10 -c "from src.extractor import sync_inbound_pdfs_to_supabase; sync_inbound_pdfs_to_supabase('data/inbound_outlook_invoices')"
 ```
 
-The extractor maps the invoice's associated PO to `shipment_id` and upserts by `invoice_id`. The dashboard joins on `shipment_id`, then falls back to matching carrier and contracted base rate. Its amount and weight buffers can be adjusted in the sidebar. The source invoice format provides accessorial fees as one aggregate amount, so the dashboard reports the unapproved amount without assuming a fee type.
+The extractor maps the invoice's associated PO to `po_number` and upserts by `invoice_id`. The source invoice format provides accessorial fees as one aggregate amount, so the dashboard reports the unapproved amount without assuming a fee type.
 
 For live OpenAI dispute drafting, copy `.streamlit/secrets.toml.example` to `.streamlit/secrets.toml` and add your own `OPENAI_API_KEY`. The app reads that Streamlit secret at draft time. Without a key, the console produces a clearly labeled deterministic draft using only reconciliation facts. Never commit a real API key, including to the example file.
 
 ## Legacy CSV fixtures
 
-CSV fixtures and the original three-way reconciliation engine remain in the repository for local tests and historical examples; the Streamlit dashboard now reads its live invoice and dispatch data from Supabase.
+The CSVs remain the source for bootstrapping local PO and receipt records and for tests. At runtime, the Streamlit dashboard reads purchase orders, invoices, and warehouse receipts from Supabase and passes those frames to the deterministic three-way reconciliation engine.
 
 - `data/erp_purchase_orders.csv`: `po_number`, vendor and route identifiers, contracted base freight, agreed fuel surcharge, and maximum authorized accessorial allowance.
 - `data/carrier_invoices_raw.csv`: invoice and PO identifiers, billed base freight, billed fuel surcharge, billed accessorial fee, billed weight, and invoice date.
@@ -57,7 +67,7 @@ The deterministic engine owns all amounts and statuses. The AI layer only drafts
 
 ## Power Automate integration
 
-The local handshake uses `inbox_drop/` for inbound invoice CSVs and `automation/discrepancy_queue.json` for outbound exceptions. The Streamlit console recognizes the newest inbound CSV, reconciles persisted source files, and exposes **Export Discrepancy Queue for Power Automate** under **Workflow export**. The queue contains the invoice/PO identifiers, status, variance amounts, receipt state, and the `approve_overcharge` / `send_ai_dispute` actions.
+The dashboard exports exceptions to `automation/discrepancy_queue.json` using **Export discrepancy queue for Power Automate**. The queue contains invoice/PO identifiers, status, variance amounts, receipt state, and the `approve_overcharge` / `send_ai_dispute` actions. Invoice PDFs are watched separately in `data/inbound_outlook_invoices` while Streamlit is running.
 
 `automation/power_automate_flow_spec.json` documents the machine-readable trigger and routing contract. `automation/power_automate_flow_spec.md` provides exact Power Automate Desktop and cloud setup steps. `automation/teams_card_template.json` is the Adaptive Card payload contract. These files describe the integration; Power Automate execution requires deployment in the target Microsoft tenant.
 

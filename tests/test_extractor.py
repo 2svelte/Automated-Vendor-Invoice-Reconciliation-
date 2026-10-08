@@ -58,11 +58,18 @@ def test_sync_inbound_pdfs_upserts_using_invoice_id(tmp_path, monkeypatch):
     inv_1004 = next(record for record in captured["records"] if record["invoice_id"] == "INV-1004")
     assert inv_1004 == {
         "invoice_id": "INV-1004",
+        "invoice_number": "INV-1004",
         "carrier_name": "Northstar Freight",
         "issue_date": "2026-09-04",
+        "invoice_date": "2026-09-04",
         "shipment_id": "PO-1004",
+        "po_number": "PO-1004",
         "billed_weight": 6000.0,
+        "billed_weight_lbs": 6000.0,
         "base_rate": 1280.0,
+        "billed_base_freight": 1280.0,
         "fuel_surcharge": 115.2,
+        "billed_fuel_surcharge": 115.2,
         "accessorial_fees": 150.0,
+        "billed_accessorial_fee": 150.0,
     }
