@@ -9,6 +9,7 @@ from numbers import Real
 import pandas as pd
 import streamlit as st
 
+from src.agent import draft_dispute
 from src.reconciliation_engine import (
     DISCREPANCY_FLAGGED,
     REVIEW_INCOMPLETE,
@@ -64,9 +65,9 @@ def format_weight(value: object) -> str:
     return f"{number:,.0f} lb"
 
 
-def _exception_reasons(row: pd.Series) -> str:
+def _exception_reasons(row: pd.Series, weight_tolerance_pct: float = 2.0) -> str:
     if row.get("reconciliation_status") == TOUCHLESS_APPROVED:
-        return "Within approval thresholds"
+        return "No discrepancies — within approval thresholds"
 
     reasons = []
     for column, label in (
@@ -80,7 +81,10 @@ def _exception_reasons(row: pd.Series) -> str:
 
     weight_variance = _numeric_value(row.get("weight_variance_lbs"))
     if weight_variance is not None and weight_variance > 0:
-        reasons.append(f"Weight +{format_weight(weight_variance)} beyond buffer")
+        reasons.append(
+            f"Carrier weight exceeds the {weight_tolerance_pct:g}% buffer by "
+            f"{format_weight(weight_variance)}"
+        )
 
     if row.get("reconciliation_status") == REVIEW_INCOMPLETE:
         reasons.append("Missing receipt")
@@ -101,47 +105,6 @@ def highlight_worklist(frame: pd.DataFrame):
         return [color] * len(row)
 
     return frame.style.apply(row_style, axis=1)
-
-
-def _dispute_memo(row: pd.Series) -> str:
-    invoice_number = str(row["invoice_number"])
-    po_number = str(row["po_number"])
-    carrier = str(row["carrier_name"])
-    overbill = _numeric_value(row.get("total_overbill")) or 0.0
-    billed_total = sum(
-        _numeric_value(row.get(column)) or 0.0
-        for column in (
-            "billed_base_freight",
-            "billed_fuel_surcharge",
-            "billed_accessorial_fee",
-        )
-    )
-    remittance = max(0.0, billed_total - overbill)
-    reasons = []
-    for column, label in (
-        ("base_variance", "Base rate"),
-        ("fuel_variance", "Fuel surcharge"),
-        ("accessorial_variance", "Unapproved accessorial"),
-    ):
-        value = _numeric_value(row.get(column))
-        if value is not None and value > 0:
-            note = (
-                " (fee type is not identified in the source invoice)"
-                if column == "accessorial_variance"
-                else ""
-            )
-            reasons.append(f"{label} exceeded authorization by {format_money(value)}{note}")
-
-    explanation = "; ".join(reasons) or "Please review the attached rate and receipt details"
-    return (
-        f"To: {carrier} Disputes Team\n"
-        f"Subject: Rate Discrepancy Notice - Invoice {invoice_number} / PO {po_number}\n\n"
-        f"Dear {carrier} Disputes Team,\n\n"
-        f"Invoice {invoice_number} has a disputed overbill of {format_money(overbill)}. "
-        f"{explanation}. Please issue a revised credit memo. "
-        f"Proposed remittance is {format_money(remittance)}.\n\n"
-        "Regards,\nAccounts Payable"
-    )
 
 
 def _comparison_table(row: pd.Series) -> pd.DataFrame:
@@ -229,6 +192,25 @@ def _save_resolution(
 
 st.set_page_config(page_title="Freight Audit Workbench", page_icon="FA", layout="wide")
 st.title("Freight Reconciliation & Exception Management")
+st.markdown(
+    """
+    <style>
+    [data-testid="stMainBlockContainer"] {
+        padding-top: 48px !important;
+    }
+    [data-testid="stMetricLabel"] p {
+        font-size: 20px !important;
+    }
+    [data-testid="stMarkdownContainer"] p,
+    [data-testid="stCaptionContainer"] p,
+    [data-testid="stMultiSelectTagsContainer"] span,
+    [data-testid="stBaseButton-header"] span {
+        font-size: 20px !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 with st.sidebar:
     st.subheader("Audit controls")
@@ -355,7 +337,10 @@ def render_audit() -> None:
                     ),
                     axis=1,
                 ),
-                "Variance detail": visible.apply(_exception_reasons, axis=1),
+                "Variance detail": visible.apply(
+                    lambda row: _exception_reasons(row, weight_tolerance_pct),
+                    axis=1,
+                ),
                 "Discrepancy": visible["total_overbill"].map(format_money),
                 "Weight delta": visible["weight_variance_lbs"].map(format_weight),
                 "Receipt": visible["receipt_found"].map(
@@ -400,7 +385,10 @@ def render_audit() -> None:
             key=f"invoice_selector_{worklist_view}",
         )
         selected = visible.loc[visible["invoice_number"].eq(selected_id)].iloc[0]
-        with st.expander(f"{selected_id} — 3-way audit and resolution", expanded=True):
+        st.subheader(
+            f"{selected_id} — {_exception_reasons(selected, weight_tolerance_pct)}"
+        )
+        with st.container():
             st.caption(
                 f"{selected['carrier_name']} · PO {selected['po_number']} · "
                 f"{selected['origin']} → {selected['destination']}"
@@ -412,15 +400,6 @@ def render_audit() -> None:
             )
             if not selected["receipt_found"]:
                 st.warning("No warehouse receipt was found for this purchase order.")
-            else:
-                weight_variance = _numeric_value(
-                    selected.get("weight_variance_lbs")
-                )
-                if weight_variance is not None and weight_variance > 0:
-                    st.warning(
-                        f"Carrier weight exceeds the {weight_tolerance_pct:g}% buffer by "
-                        f"{format_weight(weight_variance)}."
-                    )
 
             st.write(
                 f"Current audit status: **"
@@ -462,16 +441,40 @@ def render_audit() -> None:
             if selected["reconciliation_status"] == DISCREPANCY_FLAGGED or (
                 selected["audit_status"] == "DISPUTED"
             ):
-                memo = _dispute_memo(selected)
                 st.markdown("#### Carrier dispute memo")
-                st.code(memo, language="text")
-                st.download_button(
-                    "Download dispute memo",
-                    data=memo,
-                    file_name=f"{selected_id}_dispute.txt",
-                    mime="text/plain",
-                    key=f"download_memo_{selected_id}",
-                )
+                memo_key = f"dispute_memo_{selected_id}"
+                if st.button(
+                    "Generate / Regenerate AI dispute memo",
+                    key=f"generate_memo_{selected_id}",
+                ):
+                    with st.spinner("Drafting dispute memo..."):
+                        memo = draft_dispute(
+                            selected.to_dict(),
+                            api_key=st.secrets.get("OPENAI_API_KEY"),
+                        )
+                    st.session_state[memo_key] = memo
+
+                memo = st.session_state.get(memo_key)
+                if memo:
+                    if "DETERMINISTIC FALLBACK DRAFT" in memo:
+                        st.warning(
+                            "The AI draft is unavailable or no OpenAI API key is "
+                            "configured. This is a deterministic fallback draft."
+                        )
+                    else:
+                        st.caption(
+                            "AI-generated draft. Review it for accuracy before sending."
+                        )
+                    st.code(memo, language="text")
+                    st.download_button(
+                        "Download dispute memo",
+                        data=memo,
+                        file_name=f"{selected_id}_dispute.txt",
+                        mime="text/plain",
+                        key=f"download_memo_{selected_id}",
+                    )
+                else:
+                    st.caption("Generate a draft when you're ready to review it.")
 
             try:
                 events = fetch_invoice_audit_events(client, selected_id)

@@ -37,7 +37,7 @@ The command scans every PDF in the folder each time it runs; upserts use `invoic
 
 Fuel tolerance and weight buffer are adjustable in the Streamlit sidebar. The displayed overbill remains the full calculated amount; fuel tolerance affects exception classification only. The source invoice format provides accessorial fees as one aggregate amount, so the dashboard reports the unapproved amount without assuming a fee type or a carrier dispute email address.
 
-For live OpenAI dispute drafting, copy `.streamlit/secrets.toml.example` to `.streamlit/secrets.toml` and add your own `OPENAI_API_KEY`. The app reads that Streamlit secret at draft time. Without a key, the console produces a clearly labeled deterministic draft using only reconciliation facts. Never commit a real API key, including to the example file.
+For live OpenAI dispute drafting, copy `.streamlit/secrets.toml.example` to `.streamlit/secrets.toml` and add your own `OPENAI_API_KEY`. Use **Generate / Regenerate AI dispute memo** on a flagged invoice to request a draft; the selected reconciliation record is sent to OpenAI. Review the generated text before sending it. Without a key, or if the API is unavailable, the app displays a clearly labeled deterministic fallback draft. Never commit a real API key, including to the example file.
 
 ## Legacy CSV fixtures
 
