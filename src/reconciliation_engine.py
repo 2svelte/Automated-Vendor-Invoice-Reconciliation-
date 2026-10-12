@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
+from numbers import Real
 from typing import Iterable
 
 import pandas as pd
@@ -58,8 +60,16 @@ def reconcile(
     purchase_orders: pd.DataFrame,
     invoices: pd.DataFrame,
     receipts: pd.DataFrame,
+    *,
+    fuel_tolerance: float = 1.0,
+    weight_tolerance_pct: float = 2.0,
 ) -> pd.DataFrame:
     """Merge sources and calculate deterministic variances for each invoice."""
+    if fuel_tolerance < 0:
+        raise ValueError("fuel_tolerance must be zero or greater")
+    if weight_tolerance_pct < 0:
+        raise ValueError("weight_tolerance_pct must be zero or greater")
+
     raw_frames = {"purchase_orders": purchase_orders, "invoices": invoices, "receipts": receipts}
     _validate_inputs(raw_frames)
     frames = {name: _clean_columns(frame) for name, frame in raw_frames.items()}
@@ -83,17 +93,35 @@ def reconcile(
     )
     merged["variance_pct"] = merged["total_overbill"].div(merged["total_contracted_value"]).fillna(0)
 
+    fuel_over_tolerance = (merged["fuel_variance"] - fuel_tolerance).clip(lower=0)
+    tolerance_adjusted_overbill = (
+        merged["base_variance"] + fuel_over_tolerance + merged["accessorial_variance"]
+    ).clip(lower=0)
+    tolerance_adjusted_pct = (
+        tolerance_adjusted_overbill.div(merged["total_contracted_value"]).fillna(0)
+    )
     merged["weight_variance_lbs"] = (
-        merged["billed_weight_lbs"] - (merged["actual_scale_weight_lbs"] * 1.02)
+        merged["billed_weight_lbs"]
+        - (merged["actual_scale_weight_lbs"] * (1 + weight_tolerance_pct / 100))
     ).clip(lower=0)
     merged["weight_variance_pct"] = (
         merged["billed_weight_lbs"].div(merged["actual_scale_weight_lbs"]).sub(1).fillna(0).clip(lower=0)
     )
-    merged["weight_check_passed"] = merged["receipt_found"] & merged["weight_variance_lbs"].le(0)
+    merged["weight_check_passed"] = (
+        merged["receipt_found"] & merged["weight_variance_lbs"].le(0)
+    )
 
     merged["status"] = REVIEW_REQUIRED
-    merged.loc[merged["variance_pct"].le(0.01) & merged["receipt_found"] & merged["weight_check_passed"], "status"] = TOUCHLESS_APPROVED
-    merged.loc[merged["variance_pct"].gt(0.05) | merged["weight_variance_lbs"].gt(0), "status"] = DISCREPANCY_FLAGGED
+    merged.loc[
+        tolerance_adjusted_pct.le(0.01)
+        & merged["receipt_found"]
+        & merged["weight_check_passed"],
+        "status",
+    ] = TOUCHLESS_APPROVED
+    merged.loc[
+        tolerance_adjusted_pct.gt(0.05) | merged["weight_variance_lbs"].gt(0),
+        "status",
+    ] = DISCREPANCY_FLAGGED
     merged.loc[~merged["receipt_found"], "status"] = REVIEW_INCOMPLETE
     return merged.drop(columns=["receipt_match"])
 
@@ -134,7 +162,10 @@ def discrepancy_records(reconciled: pd.DataFrame) -> Iterable[dict]:
 def write_discrepancy_queue(reconciled: pd.DataFrame, output_path: str | Path) -> list[dict]:
     """Write flagged exceptions in the contract consumed by Power Automate."""
     def numeric(value: object) -> float:
-        return 0.0 if value is None or pd.isna(value) else float(value)
+        if not isinstance(value, Real):
+            return 0.0
+        number = float(value)
+        return number if math.isfinite(number) else 0.0
 
     queue = []
     for record in discrepancy_records(reconciled):

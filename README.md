@@ -19,7 +19,7 @@ Open the local Streamlit URL printed by the command. Configure Supabase as descr
 
 The schema is tracked in `supabase/migrations/`. After `supabase init` and `supabase link --project-ref <project-ref>`, preview and apply migrations with `supabase db push --dry-run` and `supabase db push`. Set `SUPABASE_URL` and `SUPABASE_KEY` in the repo-root `.env` file for the app. Install dependencies with `python -m pip install -r requirements.txt`.
 
-The first migration creates `carrier_invoices` and `internal_dispatches`. The next adds `purchase_orders` and `warehouse_goods_receipts`, and adds the canonical invoice columns used by the three-way engine. For a one-time demo seed from the included CSV fixtures, run:
+The first migration creates `carrier_invoices` and `internal_dispatches`. The next adds `purchase_orders` and `warehouse_goods_receipts`, and adds the canonical invoice columns used by the three-way engine. The audit workbench migration adds invoice resolution fields and an append-only `invoice_audit_events` trail, written transactionally by a database trigger whenever an auditor changes a resolution. Apply all migrations before using the write-back actions. For a one-time demo seed from the included CSV fixtures, run:
 
 ```powershell
 py -3.10 -m src.seed_supabase
@@ -33,7 +33,9 @@ Power Automate Desktop is the invoice ingestion trigger. After it saves an attac
 py -3.10 -c "from src.extractor import sync_inbound_pdfs_to_supabase; sync_inbound_pdfs_to_supabase('data/inbound_outlook_invoices')"
 ```
 
-The command scans every PDF in the folder each time it runs; upserts use `invoice_id`, so rerunning it updates existing invoices rather than creating duplicate rows. The dashboard only reads Supabase and refreshes the three-way reconciliation every 15 seconds. The source invoice format provides accessorial fees as one aggregate amount, so the dashboard reports the unapproved amount without assuming a fee type.
+The command scans every PDF in the folder each time it runs; upserts use `invoice_id`, so rerunning it updates existing invoices rather than creating duplicate rows. The dashboard refreshes the three-way reconciliation every 15 seconds. Auditors can mark an exception under review, dispute it, approve it with an override, or request a revised scale ticket; each action records the auditor and required resolution note in Supabase and creates an audit-history event. Resolved exceptions leave the active queue and remain visible in audit history. The dispute memo is downloadable for vendor communication.
+
+Fuel tolerance and weight buffer are adjustable in the Streamlit sidebar. The displayed overbill remains the full calculated amount; fuel tolerance affects exception classification only. The source invoice format provides accessorial fees as one aggregate amount, so the dashboard reports the unapproved amount without assuming a fee type or a carrier dispute email address.
 
 For live OpenAI dispute drafting, copy `.streamlit/secrets.toml.example` to `.streamlit/secrets.toml` and add your own `OPENAI_API_KEY`. The app reads that Streamlit secret at draft time. Without a key, the console produces a clearly labeled deterministic draft using only reconciliation facts. Never commit a real API key, including to the example file.
 
@@ -54,7 +56,8 @@ Upstream percentage-based fuel data must be normalized into the monetary `agreed
 - `accessorial_variance = max(0, billed_accessorial_fee - max_accessorial_allowance)`.
 - `total_overbill` is the sum of positive base, fuel, and accessorial variances.
 - `variance_pct` uses `contracted_base_freight + agreed_fuel_surcharge + max_accessorial_allowance` as its denominator.
-- A billed weight up to 2% above the dock scale weight passes the weight check. Higher overage is flagged, but weight has no invented dollar rate.
+- By default, a billed weight up to 2% above the dock scale weight passes the weight check; the workbench lets an auditor adjust the percentage. Higher overage is flagged, but weight has no invented dollar rate.
+- By default, fuel variances up to $1 are within tolerance. The workbench lets an auditor adjust the dollar tolerance; the reported overbill remains unchanged.
 - Missing receipts produce `REVIEW_INCOMPLETE` and cannot be touchlessly approved.
 - Complete records at or below 1% variance are `TOUCHLESS_APPROVED`.
 - Complete records above 5% variance, or beyond the weight tolerance, are `DISCREPANCY_FLAGGED`.

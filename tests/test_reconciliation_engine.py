@@ -44,6 +44,31 @@ def test_weight_tolerance_is_two_percent():
     assert over.loc[0, "weight_variance_lbs"] == pytest.approx(1)
 
 
+def test_configured_fuel_tolerance_changes_status_not_audited_variance():
+    po, invoice, receipts = sources()
+    invoice["billed_fuel_surcharge"] = 100.5
+
+    result = reconcile(po, invoice, receipts, fuel_tolerance=1.0)
+
+    assert result.loc[0, "fuel_variance"] == pytest.approx(0.5)
+    assert result.loc[0, "total_overbill"] == pytest.approx(0.5)
+    assert result.loc[0, "status"] == TOUCHLESS_APPROVED
+
+
+def test_configured_weight_buffer_controls_flag_threshold():
+    po, invoice, receipts = sources(receipt_weight=1000, billed_weight=1030)
+
+    result = reconcile(
+        po,
+        invoice,
+        receipts,
+        weight_tolerance_pct=3.0,
+    )
+
+    assert result.loc[0, "weight_variance_lbs"] == pytest.approx(0)
+    assert result.loc[0, "status"] == TOUCHLESS_APPROVED
+
+
 def test_missing_receipt_is_incomplete():
     result = reconcile(*sources(receipt=False))
     assert result.loc[0, "status"] == REVIEW_INCOMPLETE
