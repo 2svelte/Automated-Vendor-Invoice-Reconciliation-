@@ -86,6 +86,48 @@ def test_overbill_math_and_flag_threshold():
     assert result.loc[0, "status"] == DISCREPANCY_FLAGGED
 
 
+def test_itemized_accessorials_flag_unapproved_code_and_amount(tmp_path):
+    po, invoice, receipts = sources()
+    po["approved_accessorial_items"] = [[
+        {"code": "LFT", "description": "Liftgate Delivery", "amount": 90}
+    ]]
+    invoice["accessorial_items"] = [[
+        {"code": "LFT", "description": "Liftgate Delivery", "amount": 90},
+        {"code": "DET", "description": "Driver Detention", "amount": 90},
+    ]]
+    invoice["billed_accessorial_fee"] = 180
+
+    result = reconcile(po, invoice, receipts)
+
+    assert result.loc[0, "accessorial_variance"] == 90
+    assert result.loc[0, "unauthorized_accessorial_items"] == [{
+        "code": "DET",
+        "description": "Driver Detention",
+        "billed_amount": 90.0,
+        "authorized_amount": 0.0,
+        "overage": 90.0,
+    }]
+    assert result.loc[0, "status"] == DISCREPANCY_FLAGGED
+    queue = write_discrepancy_queue(result, tmp_path / "queue.json")
+    assert queue[0]["unauthorized_accessorial_items"][0]["code"] == "DET"
+
+
+def test_canonical_document_weight_fields_are_accepted():
+    po, invoice, receipts = sources()
+    po["authorized_carrier"] = po.pop("carrier_name")
+    po["contracted_base_rate"] = po.pop("contracted_base_freight")
+    po["contracted_fuel_surcharge"] = po.pop("agreed_fuel_surcharge")
+    po["approved_accessorial_allowance"] = po.pop("max_accessorial_allowance")
+    invoice["billed_chargeable_weight"] = invoice.pop("billed_weight_lbs")
+    receipts["certified_net_scale_weight"] = receipts.pop("actual_scale_weight_lbs")
+    receipts["received_timestamp"] = receipts.pop("delivery_timestamp")
+
+    result = reconcile(po, invoice, receipts)
+
+    assert result.loc[0, "weight_check_passed"]
+    assert result.loc[0, "status"] == TOUCHLESS_APPROVED
+
+
 def test_summary_calculates_stp_and_prevented_spend():
     clean = reconcile(*sources())
     po, invoice, receipts = sources()

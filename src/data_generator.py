@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -36,6 +37,40 @@ def generate_mock_data(output_dir: str | Path = DEFAULT_DATA_DIR, seed: int = 7)
             "contracted_base_freight", "agreed_fuel_surcharge", "max_accessorial_allowance",
         ],
     )
+    approved_accessorials = {
+        "PO-1001": [("LFT", "Liftgate Delivery", 75.00)],
+        "PO-1002": [("LFT", "Liftgate Delivery", 100.00)],
+        "PO-1003": [("LFT", "Liftgate Delivery", 60.00)],
+        "PO-1004": [("LFT", "Liftgate Delivery", 50.00)],
+        "PO-1005": [("LFT", "Liftgate Delivery", 80.00)],
+        "PO-1006": [("LFT", "Liftgate Delivery", 60.00)],
+        "PO-1007": [("LFT", "Liftgate Delivery", 90.00)],
+        "PO-1008": [("LFT", "Liftgate Delivery", 55.00)],
+        "PO-1009": [("LFT", "Liftgate Delivery", 45.00)],
+        "PO-1010": [("LFT", "Liftgate Delivery", 50.00)],
+        "PO-1011": [("LFT", "Liftgate Delivery", 40.00)],
+        "PO-1012": [("LFT", "Liftgate Delivery", 45.00)],
+    }
+    expected_weights = {
+        "PO-1001": 10000, "PO-1002": 12000, "PO-1003": 8000,
+        "PO-1004": 6000, "PO-1005": 9000, "PO-1006": 7000,
+        "PO-1007": 14000, "PO-1008": 6200, "PO-1009": 5000,
+        "PO-1010": 7000, "PO-1011": 4500, "PO-1012": 5200,
+    }
+    purchase_orders["contracted_expected_weight"] = purchase_orders["po_number"].map(expected_weights)
+    purchase_orders["contracted_base_rate"] = purchase_orders["contracted_base_freight"]
+    purchase_orders["contracted_fuel_surcharge"] = purchase_orders["agreed_fuel_surcharge"]
+    purchase_orders["authorized_carrier"] = purchase_orders["carrier_name"]
+    purchase_orders["approved_accessorial_allowance"] = purchase_orders["max_accessorial_allowance"]
+    purchase_orders["approved_accessorial_items"] = purchase_orders["po_number"].map(
+        lambda po_number: [
+            {"code": code, "description": description, "amount": amount}
+            for code, description, amount in approved_accessorials[po_number]
+        ]
+    )
+    purchase_orders["authorized_accessorial_codes"] = purchase_orders[
+        "approved_accessorial_items"
+    ].map(lambda items: [item["code"] for item in items])
 
     invoices = pd.DataFrame(
         [
@@ -57,6 +92,45 @@ def generate_mock_data(output_dir: str | Path = DEFAULT_DATA_DIR, seed: int = 7)
             "billed_fuel_surcharge", "billed_accessorial_fee", "billed_weight_lbs", "invoice_date",
         ],
     )
+    invoice_accessorials = {
+        "INV-1001": [("LFT", "Liftgate Delivery", 20.00)],
+        "INV-1002": [("LFT", "Liftgate Delivery", 95.00)],
+        "INV-1003": [("LFT", "Liftgate Delivery", 60.00)],
+        "INV-1004": [
+            ("LFT", "Liftgate Delivery", 60.00),
+            ("DET", "Driver Detention", 90.00),
+        ],
+        "INV-1005": [("LFT", "Liftgate Delivery", 80.00)],
+        "INV-1006": [("LFT", "Liftgate Delivery", 60.00)],
+        "INV-1007": [
+            ("LFT", "Liftgate Delivery", 90.00),
+            ("DET", "Driver Detention", 90.00),
+        ],
+        "INV-1008": [("LFT", "Liftgate Delivery", 55.00)],
+        "INV-1009": [("LFT", "Liftgate Delivery", 45.00)],
+        "INV-1010": [("LFT", "Liftgate Delivery", 50.00)],
+        "INV-1011": [("LFT", "Liftgate Delivery", 40.00)],
+        "INV-1012": [("LFT", "Liftgate Delivery", 45.00)],
+    }
+    invoices["accessorial_items"] = invoices["invoice_number"].map(
+        lambda invoice_number: [
+            {"code": code, "description": description, "amount": amount}
+            for code, description, amount in invoice_accessorials[invoice_number]
+        ]
+    )
+    invoices["billed_accessorial_fee"] = invoices["accessorial_items"].map(
+        lambda items: sum(item["amount"] for item in items)
+    )
+    invoices["billed_chargeable_weight"] = invoices["billed_weight_lbs"]
+    invoices["base_rate"] = invoices["billed_base_freight"]
+    invoices["fuel_surcharge"] = invoices["billed_fuel_surcharge"]
+    invoices["bol_number"] = invoices["po_number"].map(lambda po: f"BOL-{po[3:]}")
+    invoices["pro_number"] = invoices["po_number"].map(lambda po: f"PRO-884{po[3:]}")
+    invoices["invoice_total_due"] = (
+        invoices["billed_base_freight"]
+        + invoices["billed_fuel_surcharge"]
+        + invoices["billed_accessorial_fee"]
+    )
 
     receipts = pd.DataFrame(
         [
@@ -74,6 +148,23 @@ def generate_mock_data(output_dir: str | Path = DEFAULT_DATA_DIR, seed: int = 7)
         ],
         columns=["po_number", "delivery_timestamp", "dock_signature", "actual_scale_weight_lbs"],
     )
+    receipts["receipt_id"] = receipts["po_number"].map(lambda po: f"GRN-{po[3:]}")
+    receipts["bol_number"] = receipts["po_number"].map(lambda po: f"BOL-{po[3:]}")
+    receipts["received_timestamp"] = receipts["delivery_timestamp"]
+    receipts["scale_ticket_id"] = receipts["receipt_id"].map(lambda receipt: f"ST-{receipt[4:]}")
+    receipts["receiving_dock_door"] = receipts["receipt_id"].map(
+        lambda receipt: f"BAY-{int(receipt[4:]) % 8 + 1:02d}"
+    )
+    receipts["trailer_license_plate"] = receipts["receipt_id"].map(
+        lambda receipt: f"CO-{int(receipt[4:]):04d}"
+    )
+    receipts["gross_weight_lbs"] = receipts["actual_scale_weight_lbs"] + 21000
+    receipts["tare_weight_lbs"] = 21000
+    receipts["certified_net_scale_weight"] = receipts["actual_scale_weight_lbs"]
+    receipts["scale_certification_seal"] = "NIST-CERT-2026"
+    receipts["osd_notes"] = receipts["po_number"].map(
+        lambda po: "1 pallet damaged on arrival" if po == "PO-1005" else ""
+    )
 
     paths = {
         "purchase_orders": output_path / "erp_purchase_orders.csv",
@@ -81,12 +172,29 @@ def generate_mock_data(output_dir: str | Path = DEFAULT_DATA_DIR, seed: int = 7)
         "receipts": output_path / "warehouse_goods_receipts.csv",
         "audit_log": output_path / "reconciled_audit_log.csv",
     }
-    purchase_orders.to_csv(paths["purchase_orders"], index=False)
-    invoices.to_csv(paths["invoices"], index=False)
-    receipts.to_csv(paths["receipts"], index=False)
+    for frame, path, json_columns in (
+        (purchase_orders, paths["purchase_orders"], {"approved_accessorial_items", "authorized_accessorial_codes"}),
+        (invoices, paths["invoices"], {"accessorial_items"}),
+        (receipts, paths["receipts"], set()),
+    ):
+        export_frame = frame.copy()
+        for column in json_columns:
+            export_frame[column] = export_frame[column].map(json.dumps)
+        export_frame.to_csv(path, index=False)
     from src.reconciliation_engine import reconcile
 
-    reconcile(purchase_orders, invoices, receipts).to_csv(paths["audit_log"], index=False)
+    audit_log = reconcile(purchase_orders, invoices, receipts)
+    for column in (
+        "accessorial_items",
+        "approved_accessorial_items",
+        "authorized_accessorial_codes",
+        "unauthorized_accessorial_items",
+    ):
+        if column in audit_log:
+            audit_log[column] = audit_log[column].map(
+                lambda value: json.dumps(value) if isinstance(value, list) else value
+            )
+    audit_log.to_csv(paths["audit_log"], index=False)
     return paths
 
 

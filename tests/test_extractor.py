@@ -12,10 +12,18 @@ def test_parse_carrier_pdf_extracts_expected_fields(tmp_path):
 
     assert record["invoice_number"] == "INV-1004"
     assert record["po_number"] == "PO-1004"
+    assert record["bol_number"] == "BOL-1004"
+    assert record["pro_number"] == "PRO-8841004"
     assert record["carrier_name"] == "Northstar Freight"
+    assert record["billed_chargeable_weight"] == 6000.0
     assert record["billed_base_freight"] == 1280.0
     assert record["billed_fuel_surcharge"] == 115.2
+    assert record["accessorial_items"] == [
+        {"code": "LFT", "description": "Liftgate Delivery", "amount": 60.0},
+        {"code": "DET", "description": "Driver Detention", "amount": 90.0},
+    ]
     assert record["billed_accessorial_fee"] == 150.0
+    assert record["invoice_total_due"] == 1545.2
     assert record["billed_weight_lbs"] == 6000.0
     assert record["invoice_date"] == "2026-09-04"
 
@@ -27,6 +35,22 @@ def test_generate_mock_pdfs_creates_expected_files(tmp_path):
     assert (root / "invoice_INV-1004.pdf").exists()
     assert (root / "invoice_INV-1007.pdf").exists()
     assert set(generated) == {"invoice_INV-1004.pdf", "invoice_INV-1007.pdf"}
+
+
+def test_parse_itemized_example_invoice_includes_total_and_bol(tmp_path):
+    root = tmp_path / "sample_inbound_pdfs"
+    generate_mock_pdfs(root)
+
+    record = parse_carrier_pdf(root / "invoice_INV-1007.pdf")
+
+    assert record["bol_number"] == "BOL-1007"
+    assert record["pro_number"] == "PRO-8841007"
+    assert record["billed_chargeable_weight"] == 15000.0
+    assert record["accessorial_items"] == [
+        {"code": "LFT", "description": "Liftgate Delivery", "amount": 90.0},
+        {"code": "DET", "description": "Driver Detention", "amount": 90.0},
+    ]
+    assert record["invoice_total_due"] == 3645.0
 
 
 def test_sync_inbound_pdfs_upserts_using_invoice_id(tmp_path, monkeypatch):
@@ -64,12 +88,20 @@ def test_sync_inbound_pdfs_upserts_using_invoice_id(tmp_path, monkeypatch):
         "invoice_date": "2026-09-04",
         "shipment_id": "PO-1004",
         "po_number": "PO-1004",
+        "bol_number": "BOL-1004",
+        "pro_number": "PRO-8841004",
+        "billed_chargeable_weight": 6000.0,
         "billed_weight": 6000.0,
         "billed_weight_lbs": 6000.0,
+        "invoice_total_due": 1545.2,
         "base_rate": 1280.0,
         "billed_base_freight": 1280.0,
         "fuel_surcharge": 115.2,
         "billed_fuel_surcharge": 115.2,
+        "accessorial_items": [
+            {"code": "LFT", "description": "Liftgate Delivery", "amount": 60.0},
+            {"code": "DET", "description": "Driver Detention", "amount": 90.0},
+        ],
         "accessorial_fees": 150.0,
         "billed_accessorial_fee": 150.0,
     }

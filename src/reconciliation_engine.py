@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Mapping
 from pathlib import Path
 from numbers import Real
 from typing import Iterable
@@ -31,6 +32,8 @@ NUMERIC_COLUMNS = {
     "contracted_base_freight", "agreed_fuel_surcharge", "max_accessorial_allowance",
     "billed_base_freight", "billed_fuel_surcharge", "billed_accessorial_fee",
     "billed_weight_lbs", "actual_scale_weight_lbs",
+    "contracted_base_rate", "contracted_fuel_surcharge", "contracted_expected_weight",
+    "approved_accessorial_allowance", "billed_chargeable_weight", "certified_net_scale_weight",
 }
 
 
@@ -41,17 +44,154 @@ def _clean_columns(frame: pd.DataFrame) -> pd.DataFrame:
         cleaned[column] = pd.to_numeric(
             cleaned[column].astype(str).str.replace(r"[$,]", "", regex=True), errors="coerce"
         )
-    for column in {"po_number", "invoice_number", "carrier_name", "vendor_id", "dock_signature"}.intersection(cleaned.columns):
+    for column in {
+        "po_number",
+        "invoice_number",
+        "carrier_name",
+        "authorized_carrier",
+        "vendor_id",
+        "dock_signature",
+    }.intersection(cleaned.columns):
         cleaned[column] = cleaned[column].astype("string").str.strip()
     return cleaned
+
+
+def _normalize_source_columns(name: str, frame: pd.DataFrame) -> pd.DataFrame:
+    aliases = {
+        "purchase_orders": {
+            "carrier_name": ("authorized_carrier",),
+            "contracted_base_freight": ("contracted_base_rate",),
+            "agreed_fuel_surcharge": ("contracted_fuel_surcharge",),
+            "max_accessorial_allowance": ("approved_accessorial_allowance",),
+        },
+        "invoices": {
+            "billed_base_freight": ("base_rate",),
+            "billed_fuel_surcharge": ("fuel_surcharge",),
+            "billed_weight_lbs": ("billed_chargeable_weight",),
+            "invoice_date": ("issue_date",),
+        },
+        "receipts": {
+            "delivery_timestamp": ("received_timestamp",),
+            "actual_scale_weight_lbs": ("certified_net_scale_weight",),
+        },
+    }
+    normalized = frame.copy()
+    for canonical, candidates in aliases.get(name, {}).items():
+        if canonical not in normalized:
+            for candidate in candidates:
+                if candidate in normalized:
+                    normalized[canonical] = normalized[candidate]
+                    break
+    return normalized
+
+
+def _accessorial_items(value: object) -> list[Mapping[str, object]]:
+    if value is None or value is pd.NA:
+        return []
+    if isinstance(value, float) and math.isnan(value):
+        return []
+    if isinstance(value, str):
+        value = json.loads(value)
+    if not isinstance(value, list):
+        raise ValueError("Accessorial items must be provided as a JSON array.")
+    if any(not isinstance(item, Mapping) for item in value):
+        raise ValueError("Each accessorial item must be a JSON object.")
+    return value
+
+
+def _itemized_accessorial_variance(
+    billed_value: object,
+    approved_value: object,
+    billed_total: object,
+    approved_total: object,
+) -> tuple[float, list[dict[str, object]]]:
+    billed_items = _accessorial_items(billed_value)
+    approved_items = _accessorial_items(approved_value)
+    legacy_allowance = pd.to_numeric(approved_total, errors="coerce")
+    use_legacy_allowance = (
+        not approved_items
+        and pd.notna(legacy_allowance)
+        and float(legacy_allowance) > 0
+    )
+    if not billed_items or use_legacy_allowance:
+        billed = pd.to_numeric(billed_total, errors="coerce")
+        allowance = legacy_allowance if pd.notna(legacy_allowance) else 0.0
+        if pd.isna(billed):
+            return float("nan"), []
+        return max(0.0, float(billed) - float(allowance)), []
+
+    approved_by_code: dict[str, float] = {}
+    for item in approved_items:
+        code = str(item.get("code", "")).strip().upper()
+        amount = pd.to_numeric(item.get("amount"), errors="coerce")
+        if pd.isna(amount):
+            raise ValueError(f"Approved accessorial {code or '<unknown>'} has no valid amount.")
+        approved_by_code[code] = approved_by_code.get(code, 0.0) + float(amount)
+
+    billed_by_code: dict[str, dict[str, object]] = {}
+    for item in billed_items:
+        code = str(item.get("code", "")).strip().upper()
+        amount = pd.to_numeric(item.get("amount"), errors="coerce")
+        if pd.isna(amount):
+            raise ValueError(f"Billed accessorial {code or '<unknown>'} has no valid amount.")
+        line = billed_by_code.setdefault(
+            code,
+            {
+                "code": code,
+                "description": str(item.get("description", "")).strip(),
+                "billed_amount": 0.0,
+            },
+        )
+        line["billed_amount"] = float(line["billed_amount"]) + float(amount)
+
+    unauthorized: list[dict[str, object]] = []
+    for code, line in billed_by_code.items():
+        authorized_amount = approved_by_code.get(code, 0.0)
+        billed_amount = float(line["billed_amount"])
+        overage = max(0.0, billed_amount - authorized_amount)
+        if overage > 0:
+            unauthorized.append(
+                {
+                    **line,
+                    "authorized_amount": authorized_amount,
+                    "overage": overage,
+                }
+            )
+    return sum(float(item["overage"]) for item in unauthorized), unauthorized
 
 
 def _validate_inputs(frames: dict[str, pd.DataFrame]) -> None:
     missing_sources = set(REQUIRED_COLUMNS) - set(frames)
     if missing_sources:
         raise ValueError(f"Missing required sources: {', '.join(sorted(missing_sources))}")
+    alternatives = {
+        "purchase_orders": {
+            "carrier_name": {"carrier_name", "authorized_carrier"},
+            "contracted_base_freight": {"contracted_base_freight", "contracted_base_rate"},
+            "agreed_fuel_surcharge": {"agreed_fuel_surcharge", "contracted_fuel_surcharge"},
+            "max_accessorial_allowance": {
+                "max_accessorial_allowance",
+                "approved_accessorial_allowance",
+            },
+        },
+        "invoices": {
+            "billed_base_freight": {"billed_base_freight", "base_rate"},
+            "billed_fuel_surcharge": {"billed_fuel_surcharge", "fuel_surcharge"},
+            "billed_weight_lbs": {"billed_weight_lbs", "billed_chargeable_weight"},
+            "invoice_date": {"invoice_date", "issue_date"},
+        },
+        "receipts": {
+            "delivery_timestamp": {"delivery_timestamp", "received_timestamp"},
+            "actual_scale_weight_lbs": {"actual_scale_weight_lbs", "certified_net_scale_weight"},
+        },
+    }
     for source_name, required in REQUIRED_COLUMNS.items():
-        missing_columns = required - set(frames[source_name].columns.str.lower())
+        columns = set(frames[source_name].columns.str.lower())
+        missing_columns = {
+            column
+            for column in required
+            if not columns.intersection(alternatives.get(source_name, {}).get(column, {column}))
+        }
         if missing_columns:
             raise ValueError(f"{source_name} is missing columns: {', '.join(sorted(missing_columns))}")
 
@@ -71,18 +211,35 @@ def reconcile(
         raise ValueError("weight_tolerance_pct must be zero or greater")
 
     raw_frames = {"purchase_orders": purchase_orders, "invoices": invoices, "receipts": receipts}
-    _validate_inputs(raw_frames)
-    frames = {name: _clean_columns(frame) for name, frame in raw_frames.items()}
+    frames = {
+        name: _normalize_source_columns(name, _clean_columns(frame))
+        for name, frame in raw_frames.items()
+    }
+    _validate_inputs(frames)
 
     merged = frames["invoices"].merge(frames["purchase_orders"], on="po_number", how="left", suffixes=("", "_po"))
-    merged = merged.merge(frames["receipts"], on="po_number", how="left", indicator="receipt_match")
+    merged = merged.merge(
+        frames["receipts"],
+        on="po_number",
+        how="left",
+        indicator="receipt_match",
+        suffixes=("", "_receipt"),
+    )
     merged["receipt_found"] = merged["receipt_match"].eq("both")
 
     merged["base_variance"] = merged["billed_base_freight"] - merged["contracted_base_freight"]
     merged["fuel_variance"] = merged["billed_fuel_surcharge"] - merged["agreed_fuel_surcharge"]
-    merged["accessorial_variance"] = (
-        merged["billed_accessorial_fee"] - merged["max_accessorial_allowance"]
-    ).clip(lower=0)
+    accessorial_results = merged.apply(
+        lambda row: _itemized_accessorial_variance(
+            row.get("accessorial_items"),
+            row.get("approved_accessorial_items"),
+            row.get("billed_accessorial_fee"),
+            row.get("max_accessorial_allowance"),
+        ),
+        axis=1,
+    )
+    merged["accessorial_variance"] = accessorial_results.map(lambda result: result[0])
+    merged["unauthorized_accessorial_items"] = accessorial_results.map(lambda result: result[1])
     merged["total_overbill"] = (
         merged["base_variance"] + merged["fuel_variance"] + merged["accessorial_variance"]
     ).clip(lower=0)
@@ -180,6 +337,9 @@ def write_discrepancy_queue(reconciled: pd.DataFrame, output_path: str | Path) -
                 "base_variance": round(numeric(record.get("base_variance")), 2),
                 "fuel_variance": round(numeric(record.get("fuel_variance")), 2),
                 "accessorial_variance": round(numeric(record.get("accessorial_variance")), 2),
+                "unauthorized_accessorial_items": record.get(
+                    "unauthorized_accessorial_items", []
+                ),
                 "weight_variance_lbs": round(numeric(record.get("weight_variance_lbs")), 2),
                 "receipt_found": bool(record.get("receipt_found")) if pd.notna(record.get("receipt_found")) else False,
                 "actions": ["approve_overcharge", "send_ai_dispute"],

@@ -1,12 +1,13 @@
-invoice_number,po_number,carrier_name,billed_base_freight,billed_fuel_surcharge,billed_accessorial_fee,billed_weight_lbs,invoice_date
-INV-1001,PO-1001,Northstar Freight,2450,220.5,20,10000,1/9/2026
-INV-1002,PO-1002,BlueLine Logistics,3100,310,95,12000,2/9/2026
-INV-1003,PO-1003,Atlas Haulage,1850,191.5,60,8000,3/9/2026
-INV-1005,PO-1005,BlueLine Logistics,2200,198,80,9000,5/9/2026
-INV-1006,PO-1006,Atlas Haulage,1640,147.6,60,7000,6/9/2026
-INV-1007,PO-1007,Northstar Freight,3180,285,180,15000,7/9/2026
-INV-1008,PO-1008,BlueLine Logistics,1460,131.4,55,6200,8/9/2026
-INV-1009,PO-1009,Atlas Haulage,1180,106.2,45,5000,9/9/2026
-INV-1010,PO-1010,Northstar Freight,1350,121.5,50,7000,10/9/2026
-INV-1011,PO-1011,BlueLine Logistics,980,88.2,40,4500,11/9/2026
-INV-1012,PO-1012,Atlas Haulage,1090,98.1,45,5200,12/9/2026
+invoice_number,po_number,carrier_name,billed_base_freight,billed_fuel_surcharge,billed_accessorial_fee,billed_weight_lbs,invoice_date,accessorial_items,billed_chargeable_weight,base_rate,fuel_surcharge,bol_number,pro_number,invoice_total_due
+INV-1001,PO-1001,Northstar Freight,2450.0,220.5,20.0,10000,2026-09-01,"[{""code"": ""LFT"", ""description"": ""Liftgate Delivery"", ""amount"": 20.0}]",10000,2450.0,220.5,BOL-1001,PRO-8841001,2690.5
+INV-1002,PO-1002,BlueLine Logistics,3100.0,310.0,95.0,12000,2026-09-02,"[{""code"": ""LFT"", ""description"": ""Liftgate Delivery"", ""amount"": 95.0}]",12000,3100.0,310.0,BOL-1002,PRO-8841002,3505.0
+INV-1003,PO-1003,Atlas Haulage,1850.0,191.5,60.0,8000,2026-09-03,"[{""code"": ""LFT"", ""description"": ""Liftgate Delivery"", ""amount"": 60.0}]",8000,1850.0,191.5,BOL-1003,PRO-8841003,2101.5
+INV-1004,PO-1004,Northstar Freight,1280.0,115.2,150.0,6000,2026-09-04,"[{""code"": ""LFT"", ""description"": ""Liftgate Delivery"", ""amount"": 60.0}, {""code"": ""DET"", ""description"": ""Driver Detention"", ""amount"": 90.0}]",6000,1280.0,115.2,BOL-1004,PRO-8841004,1545.2
+INV-1005,PO-1005,BlueLine Logistics,2200.0,198.0,80.0,9000,2026-09-05,"[{""code"": ""LFT"", ""description"": ""Liftgate Delivery"", ""amount"": 80.0}]",9000,2200.0,198.0,BOL-1005,PRO-8841005,2478.0
+INV-1006,PO-1006,Atlas Haulage,1640.0,147.6,60.0,7000,2026-09-06,"[{""code"": ""LFT"", ""description"": ""Liftgate Delivery"", ""amount"": 60.0}]",7000,1640.0,147.6,BOL-1006,PRO-8841006,1847.6
+INV-1007,PO-1007,Northstar Freight,3180.0,285.0,180.0,15000,2026-09-07,"[{""code"": ""LFT"", ""description"": ""Liftgate Delivery"", ""amount"": 90.0}, {""code"": ""DET"", ""description"": ""Driver Detention"", ""amount"": 90.0}]",15000,3180.0,285.0,BOL-1007,PRO-8841007,3645.0
+INV-1008,PO-1008,BlueLine Logistics,1460.0,131.4,55.0,6200,2026-09-08,"[{""code"": ""LFT"", ""description"": ""Liftgate Delivery"", ""amount"": 55.0}]",6200,1460.0,131.4,BOL-1008,PRO-8841008,1646.4
+INV-1009,PO-1009,Atlas Haulage,1180.0,106.2,45.0,5000,2026-09-09,"[{""code"": ""LFT"", ""description"": ""Liftgate Delivery"", ""amount"": 45.0}]",5000,1180.0,106.2,BOL-1009,PRO-8841009,1331.2
+INV-1010,PO-1010,Northstar Freight,1350.0,121.5,50.0,7000,2026-09-10,"[{""code"": ""LFT"", ""description"": ""Liftgate Delivery"", ""amount"": 50.0}]",7000,1350.0,121.5,BOL-1010,PRO-8841010,1521.5
+INV-1011,PO-1011,BlueLine Logistics,980.0,88.2,40.0,4500,2026-09-11,"[{""code"": ""LFT"", ""description"": ""Liftgate Delivery"", ""amount"": 40.0}]",4500,980.0,88.2,BOL-1011,PRO-8841011,1108.2
+INV-1012,PO-1012,Atlas Haulage,1090.0,98.1,45.0,5200,2026-09-12,"[{""code"": ""LFT"", ""description"": ""Liftgate Delivery"", ""amount"": 45.0}]",5200,1090.0,98.1,BOL-1012,PRO-8841012,1233.1

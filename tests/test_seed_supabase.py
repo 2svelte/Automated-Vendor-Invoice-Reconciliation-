@@ -8,16 +8,27 @@ def test_seed_supabase_maps_all_csv_sources_to_tables(tmp_path, monkeypatch):
         "po_number": "PO-1", "vendor_id": "V-1", "carrier_name": "Carrier",
         "origin": "A", "destination": "B", "contracted_base_freight": 1000,
         "agreed_fuel_surcharge": 100, "max_accessorial_allowance": 50,
+        "contracted_expected_weight": 1000, "contracted_base_rate": 1000,
+        "contracted_fuel_surcharge": 100,
+        "approved_accessorial_items": '[{"code":"LFT","description":"Liftgate Delivery","amount":50}]',
+        "authorized_accessorial_codes": '["LFT"]',
     }]).to_csv(tmp_path / "erp_purchase_orders.csv", index=False)
     pd.DataFrame([{
         "invoice_number": "INV-1", "po_number": "PO-1", "carrier_name": "Carrier",
         "billed_base_freight": 1000, "billed_fuel_surcharge": 100,
         "billed_accessorial_fee": 50, "billed_weight_lbs": 1000,
+        "billed_chargeable_weight": 1000, "bol_number": "BOL-1",
+        "pro_number": "PRO-1",
+        "accessorial_items": '[{"code":"LFT","description":"Liftgate Delivery","amount":50}]',
+        "invoice_total_due": 1150,
         "invoice_date": "2026-09-01",
     }]).to_csv(tmp_path / "carrier_invoices_raw.csv", index=False)
     pd.DataFrame([{
         "po_number": "PO-1", "delivery_timestamp": "2026-09-01 10:00",
         "dock_signature": "Receiver", "actual_scale_weight_lbs": 1000,
+        "receipt_id": "GRN-1", "bol_number": "BOL-1",
+        "received_timestamp": "2026-09-01 10:00", "scale_ticket_id": "ST-1",
+        "certified_net_scale_weight": 1000,
     }]).to_csv(tmp_path / "warehouse_goods_receipts.csv", index=False)
     captured = []
 
@@ -49,3 +60,10 @@ def test_seed_supabase_maps_all_csv_sources_to_tables(tmp_path, monkeypatch):
     assert invoice["invoice_id"] == invoice["invoice_number"] == "INV-1"
     assert invoice["po_number"] == invoice["shipment_id"] == "PO-1"
     assert invoice["billed_base_freight"] == invoice["base_rate"] == 1000
+    assert invoice["accessorial_items"] == [
+        {"code": "LFT", "description": "Liftgate Delivery", "amount": 50}
+    ]
+    purchase_order = next(rows[0] for table, rows, _ in captured if table == "purchase_orders")
+    assert purchase_order["approved_accessorial_items"] == [
+        {"code": "LFT", "description": "Liftgate Delivery", "amount": 50}
+    ]

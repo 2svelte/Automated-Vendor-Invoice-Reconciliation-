@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 from pathlib import Path
@@ -10,9 +11,14 @@ import pdfplumber
 EXPECTED_COLUMNS = [
     "invoice_number",
     "po_number",
+    "bol_number",
+    "pro_number",
     "carrier_name",
+    "billed_chargeable_weight",
     "billed_base_freight",
     "billed_fuel_surcharge",
+    "accessorial_items",
+    "invoice_total_due",
     "billed_accessorial_fee",
     "billed_weight_lbs",
     "invoice_date",
@@ -50,13 +56,15 @@ def _extract_weight(text: str, pattern: str, default: float = 0.0) -> float:
 
 
 def parse_carrier_pdf(pdf_path: str | os.PathLike[str]) -> dict[str, object]:
-    """Parse a carrier PDF into the same schema expected by the reconciliation engine."""
+    """Extract canonical invoice fields and compatibility aliases from a carrier PDF."""
     pdf_file = Path(pdf_path)
     with pdfplumber.open(str(pdf_file)) as pdf:
         text = "\n".join(page.extract_text() or "" for page in pdf.pages)
 
     invoice_number = _find_pattern(text, r"Invoice\s*Number:\s*([A-Za-z0-9-]+)", default="UNKNOWN")
     po_number = _find_pattern(text, r"Associated\s*PO:\s*([A-Za-z0-9-]+)", default="UNKNOWN")
+    bol_number = _find_pattern(text, r"(?:Shipper\s*)?BOL\s*(?:Number)?:\s*([A-Za-z0-9-]+)")
+    pro_number = _find_pattern(text, r"Carrier\s*PRO\s*Number:\s*([A-Za-z0-9-]+)")
     invoice_date = _find_pattern(text, r"Billing\s*Date:\s*([\d-]+)", default="2026-09-01")
 
     carrier_name_match = re.search(r"FREIGHT BILLING INVOICE:\s*([A-Za-z0-9& .-]+)", text, flags=re.IGNORECASE)
@@ -71,14 +79,57 @@ def parse_carrier_pdf(pdf_path: str | os.PathLike[str]) -> dict[str, object]:
         else:
             carrier_name = "UNKNOWN"
 
+    accessorial_items = [
+        {
+            "code": code,
+            "description": description.strip(),
+            "amount": _clean_number(amount),
+        }
+        for code, description, amount in re.findall(
+            r"Accessorial Item:\s*([A-Za-z0-9_-]+)\s*\|\s*(.*?)\s*\|\s*\$?\s*([\d,]+(?:\.\d+)?)",
+            text,
+            flags=re.IGNORECASE | re.MULTILINE,
+        )
+    ]
+    accessorial_total = sum(item["amount"] for item in accessorial_items)
+    if not accessorial_items:
+        accessorial_total = _extract_money(
+            text, r"Accessorial Surcharges:\s*\$?\s*([\d,]+(?:\.\d+)?)"
+        )
+    billed_weight = _extract_weight(
+        text,
+        r"(?:Billed\s*Chargeable\s*Weight|Certified\s*Scale\s*Weight):\s*([\d,]+)",
+    )
+    base_rate = _extract_money(
+        text,
+        r"(?:Base\s*Rate|Base\s*Freight\s*Linehaul):\s*\$?\s*([\d,]+(?:\.\d+)?)",
+    )
+    fuel_surcharge = _extract_money(
+        text,
+        r"(?:Fuel\s*Surcharge|Fuel\s*Surcharge\s*Index):\s*\$?\s*([\d,]+(?:\.\d+)?)",
+    )
+    total_due = _extract_money(
+        text,
+        r"(?:TOTAL\s*CHARGES\s*DUE|Total\s*Due):\s*\$?\s*([\d,]+(?:\.\d+)?)",
+        default=base_rate + fuel_surcharge + accessorial_total,
+    )
+
     return {
         "invoice_number": invoice_number,
         "po_number": po_number,
+        "bol_number": bol_number,
+        "pro_number": pro_number,
         "carrier_name": carrier_name,
-        "billed_base_freight": _extract_money(text, r"Base Freight Linehaul:\s*\$?\s*([\d,]+(?:\.\d+)?)"),
-        "billed_fuel_surcharge": _extract_money(text, r"Fuel Surcharge Index:\s*\$?\s*([\d,]+(?:\.\d+)?)"),
-        "billed_accessorial_fee": _extract_money(text, r"Accessorial Surcharges:\s*\$?\s*([\d,]+(?:\.\d+)?)"),
-        "billed_weight_lbs": _extract_weight(text, r"Certified Scale Weight:\s*([\d,]+)"),
+        "billed_chargeable_weight": billed_weight,
+        "billed_weight_lbs": billed_weight,
+        "billed_base_freight": base_rate,
+        "base_rate": base_rate,
+        "billed_fuel_surcharge": fuel_surcharge,
+        "fuel_surcharge": fuel_surcharge,
+        "accessorial_items": accessorial_items,
+        "billed_accessorial_fee": accessorial_total,
+        "invoice_total_due": total_due,
+        "total_amount": total_due,
         "invoice_date": invoice_date,
     }
 
@@ -94,12 +145,17 @@ def parse_supabase_invoice_pdf(pdf_path: str | os.PathLike[str]) -> dict[str, ob
         "invoice_date": parsed["invoice_date"],
         "shipment_id": parsed["po_number"],
         "po_number": parsed["po_number"],
+        "bol_number": parsed["bol_number"],
+        "pro_number": parsed["pro_number"],
+        "billed_chargeable_weight": parsed["billed_chargeable_weight"],
         "billed_weight": parsed["billed_weight_lbs"],
         "billed_weight_lbs": parsed["billed_weight_lbs"],
+        "invoice_total_due": parsed["invoice_total_due"],
         "base_rate": parsed["billed_base_freight"],
         "billed_base_freight": parsed["billed_base_freight"],
         "fuel_surcharge": parsed["billed_fuel_surcharge"],
         "billed_fuel_surcharge": parsed["billed_fuel_surcharge"],
+        "accessorial_items": parsed["accessorial_items"],
         "accessorial_fees": parsed["billed_accessorial_fee"],
         "billed_accessorial_fee": parsed["billed_accessorial_fee"],
     }

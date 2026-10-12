@@ -22,13 +22,21 @@ SOURCE_COLUMNS = {
     "purchase_orders": [
         "po_number", "vendor_id", "carrier_name", "origin", "destination",
         "contracted_base_freight", "agreed_fuel_surcharge", "max_accessorial_allowance",
+        "contracted_expected_weight", "contracted_base_rate", "contracted_fuel_surcharge",
+        "authorized_carrier", "approved_accessorial_allowance",
+        "approved_accessorial_items", "authorized_accessorial_codes",
     ],
     "carrier_invoices": [
         "invoice_number", "po_number", "carrier_name", "billed_base_freight",
         "billed_fuel_surcharge", "billed_accessorial_fee", "billed_weight_lbs", "invoice_date",
+        "bol_number", "pro_number", "billed_chargeable_weight", "accessorial_items",
+        "invoice_total_due",
     ],
     "warehouse_goods_receipts": [
         "po_number", "delivery_timestamp", "dock_signature", "actual_scale_weight_lbs",
+        "receipt_id", "bol_number", "received_timestamp", "scale_ticket_id",
+        "receiving_dock_door", "trailer_license_plate", "gross_weight_lbs", "tare_weight_lbs",
+        "certified_net_scale_weight", "scale_certification_seal", "osd_notes",
     ],
 }
 

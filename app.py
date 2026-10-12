@@ -67,28 +67,41 @@ def format_weight(value: object) -> str:
 
 def _exception_reasons(row: pd.Series, weight_tolerance_pct: float = 2.0) -> str:
     if row.get("reconciliation_status") == TOUCHLESS_APPROVED:
-        return "No discrepancies — within approval thresholds"
+        return "No discrepancies — within approval thresholds."
 
     reasons = []
-    for column, label in (
-        ("base_variance", "Base rate"),
-        ("fuel_variance", "Fuel surcharge"),
-        ("accessorial_variance", "Accessorial"),
+    unauthorized_items = row.get("unauthorized_accessorial_items", [])
+    if isinstance(unauthorized_items, list) and unauthorized_items:
+        reasons.extend(
+            (
+                f"Unauthorized accessorial {item.get('code') or 'UNKNOWN'} "
+                f"({item.get('description') or 'description unavailable'}): "
+                f"{format_money(item.get('overage'))}."
+            )
+            for item in unauthorized_items
+        )
+    for column, label, include_currency in (
+        ("base_variance", "Base rate", False),
+        ("fuel_variance", "Fuel surcharge", False),
+        ("accessorial_variance", "Accessorial", True),
     ):
         value = _numeric_value(row.get(column))
-        if value is not None and value > 0:
-            reasons.append(f"{label} {format_money(value)} over")
+        if value is not None and value > 0 and not (
+            column == "accessorial_variance" and unauthorized_items
+        ):
+            amount = format_money(value) if include_currency else f"{value:,.2f}"
+            reasons.append(f"{label}: {amount} over.")
 
     weight_variance = _numeric_value(row.get("weight_variance_lbs"))
     if weight_variance is not None and weight_variance > 0:
         reasons.append(
             f"Carrier weight exceeds the {weight_tolerance_pct:g}% buffer by "
-            f"{format_weight(weight_variance)}"
+            f"{format_weight(weight_variance)}."
         )
 
     if row.get("reconciliation_status") == REVIEW_INCOMPLETE:
-        reasons.append("Missing receipt")
-    return " · ".join(reasons) if reasons else "Review required"
+        reasons.append("Missing receipt.")
+    return " ".join(reasons) if reasons else "Review required."
 
 
 def highlight_worklist(frame: pd.DataFrame):
@@ -108,13 +121,20 @@ def highlight_worklist(frame: pd.DataFrame):
 
 
 def _comparison_table(row: pd.Series) -> pd.DataFrame:
-    billed_weight = _numeric_value(row.get("billed_weight_lbs"))
-    scale_weight = _numeric_value(row.get("actual_scale_weight_lbs"))
+    billed_weight = _numeric_value(
+        row.get("billed_chargeable_weight", row.get("billed_weight_lbs"))
+    )
+    scale_weight = _numeric_value(
+        row.get("certified_net_scale_weight", row.get("actual_scale_weight_lbs"))
+    )
+    expected_weight = row.get(
+        "contracted_expected_weight", row.get("expected_weight")
+    )
     components = [
         (
             "Base freight",
             row.get("billed_base_freight"),
-            row.get("contracted_base_freight"),
+            row.get("contracted_base_rate", row.get("contracted_base_freight")),
             None,
             row.get("base_variance"),
             "money",
@@ -122,24 +142,16 @@ def _comparison_table(row: pd.Series) -> pd.DataFrame:
         (
             "Fuel surcharge",
             row.get("billed_fuel_surcharge"),
-            row.get("agreed_fuel_surcharge"),
+            row.get("contracted_fuel_surcharge", row.get("agreed_fuel_surcharge")),
             None,
             row.get("fuel_variance"),
             "money",
         ),
         (
-            "Accessorial fees (type unavailable)",
-            row.get("billed_accessorial_fee"),
-            row.get("max_accessorial_allowance"),
-            None,
-            row.get("accessorial_variance"),
-            "money",
-        ),
-        (
-            "Gross weight",
-            row.get("billed_weight_lbs"),
-            None,
-            row.get("actual_scale_weight_lbs"),
+            "Chargeable weight",
+            billed_weight,
+            expected_weight,
+            scale_weight,
             billed_weight - scale_weight
             if billed_weight is not None and scale_weight is not None
             else None,
@@ -163,7 +175,7 @@ def _comparison_table(row: pd.Series) -> pd.DataFrame:
                 {
                     "Component": label,
                     "Invoiced (Carrier)": format_weight(billed),
-                    "Authorized (PO)": "—",
+                    "Authorized (PO)": format_weight(authorized),
                     "Physical (WMS)": format_weight(physical),
                     "Variance": (
                         "N/A"
@@ -172,6 +184,71 @@ def _comparison_table(row: pd.Series) -> pd.DataFrame:
                     ),
                 }
             )
+    for label, column in (
+        ("Truck + trailer + cargo gross weight", "gross_weight_lbs"),
+        ("Empty truck + trailer tare weight", "tare_weight_lbs"),
+    ):
+        result.append(
+            {
+                "Component": label,
+                "Invoiced (Carrier)": "—",
+                "Authorized (PO)": "—",
+                "Physical (WMS)": format_weight(row.get(column)),
+                "Variance": "—",
+            }
+        )
+    billed_items = row.get("accessorial_items", [])
+    approved_items = row.get("approved_accessorial_items", [])
+    legacy_allowance = _numeric_value(row.get("max_accessorial_allowance"))
+    if (
+        isinstance(billed_items, list)
+        and billed_items
+        and isinstance(approved_items, list)
+        and (approved_items or legacy_allowance in (None, 0.0))
+    ):
+        billed_by_code: dict[str, dict[str, object]] = {}
+        for item in billed_items:
+            code = str(item.get("code", "")).strip().upper()
+            entry = billed_by_code.setdefault(
+                code,
+                {
+                    "description": str(item.get("description", "")).strip(),
+                    "amount": 0.0,
+                },
+            )
+            entry["amount"] = float(entry["amount"]) + float(item.get("amount", 0))
+        approved_by_code: dict[str, float] = {}
+        if isinstance(approved_items, list):
+            for item in approved_items:
+                code = str(item.get("code", "")).strip().upper()
+                approved_by_code[code] = approved_by_code.get(code, 0.0) + float(
+                    item.get("amount", 0)
+                )
+        accessorial_rows = []
+        for code, item in billed_by_code.items():
+            billed_amount = float(item["amount"])
+            approved_amount = approved_by_code.get(code, 0.0)
+            accessorial_rows.append(
+                {
+                    "Component": f"Accessorial — {code or 'UNKNOWN'}: {item['description']}",
+                    "Invoiced (Carrier)": format_money(billed_amount),
+                    "Authorized (PO)": format_money(approved_amount),
+                    "Physical (WMS)": "—",
+                    "Variance": format_money(max(0.0, billed_amount - approved_amount)),
+                }
+            )
+        result[2:2] = accessorial_rows
+    else:
+        result.insert(
+            2,
+            {
+                "Component": "Accessorial fees (legacy aggregate)",
+                "Invoiced (Carrier)": format_money(row.get("billed_accessorial_fee")),
+                "Authorized (PO)": format_money(row.get("max_accessorial_allowance")),
+                "Physical (WMS)": "—",
+                "Variance": format_money(row.get("accessorial_variance")),
+            },
+        )
     return pd.DataFrame(result)
 
 
@@ -386,8 +463,7 @@ def render_audit() -> None:
         )
         selected = visible.loc[visible["invoice_number"].eq(selected_id)].iloc[0]
         st.subheader(
-            f"{selected_id} — "
-            f"{AUDIT_STATUS_LABELS.get(selected['audit_status'], selected['status'])} · "
+            f"{selected_id}: {selected['status']}. "
             f"{_exception_reasons(selected, weight_tolerance_pct)}"
         )
         with st.container():
@@ -395,11 +471,34 @@ def render_audit() -> None:
                 f"{selected['carrier_name']} · PO {selected['po_number']} · "
                 f"{selected['origin']} → {selected['destination']}"
             )
+            invoice_pro = selected.get("pro_number")
+            invoice_bol = selected.get("bol_number")
+            st.caption(
+                f"Carrier PRO {invoice_pro if isinstance(invoice_pro, str) and invoice_pro else 'unavailable'} "
+                f"· BOL {invoice_bol if isinstance(invoice_bol, str) and invoice_bol else 'unavailable'} "
+                f"· Invoice total due {format_money(selected.get('invoice_total_due', selected.get('total_amount')))}"
+            )
+            receipt_id = selected.get("receipt_id")
+            scale_ticket_id = selected.get("scale_ticket_id")
+            receiving_dock = selected.get("receiving_dock_door")
+            receipt_details = [
+                f"Receipt {receipt_id if isinstance(receipt_id, str) and receipt_id else 'ID unavailable'}",
+                f"Scale ticket {scale_ticket_id if isinstance(scale_ticket_id, str) and scale_ticket_id else 'ID unavailable'}",
+                f"Dock {receiving_dock if isinstance(receiving_dock, str) and receiving_dock else 'unavailable'}",
+                f"Certified net {format_weight(selected.get('certified_net_scale_weight', selected.get('actual_scale_weight_lbs')))}",
+            ]
+            receipt_seal = selected.get("scale_certification_seal")
+            if receipt_seal:
+                receipt_details.append(f"Scale certification {receipt_seal}")
+            st.caption(" · ".join(receipt_details))
             st.dataframe(
                 _comparison_table(selected),
                 use_container_width=True,
                 hide_index=True,
             )
+            osd_notes = selected.get("osd_notes")
+            if isinstance(osd_notes, str) and osd_notes.strip():
+                st.warning(f"Warehouse OS&D note: {osd_notes}")
             if not selected["receipt_found"]:
                 st.warning("No warehouse receipt was found for this purchase order.")
 
