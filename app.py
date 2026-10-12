@@ -65,6 +65,9 @@ def format_weight(value: object) -> str:
 
 
 def _exception_reasons(row: pd.Series) -> str:
+    if row.get("reconciliation_status") == TOUCHLESS_APPROVED:
+        return "Within approval thresholds"
+
     reasons = []
     for column, label in (
         ("base_variance", "Base rate"),
@@ -213,13 +216,10 @@ def _save_resolution(
     client,
     invoice_number: str,
     audit_status: str,
-    auditor_name: str,
     audit_note: str,
 ) -> None:
     try:
-        update_invoice_audit(
-            client, invoice_number, audit_status, auditor_name, audit_note
-        )
+        update_invoice_audit(client, invoice_number, audit_status, audit_note)
     except Exception as error:
         st.error(f"Could not save the resolution for {invoice_number}: {error}")
         return
@@ -229,10 +229,6 @@ def _save_resolution(
 
 st.set_page_config(page_title="Freight Audit Workbench", page_icon="FA", layout="wide")
 st.title("Freight Reconciliation & Exception Management")
-st.caption(
-    "Review only invoices that need a decision. Reconciliation is grounded in the "
-    "carrier invoice, ERP purchase order, and warehouse receipt."
-)
 
 with st.sidebar:
     st.subheader("Audit controls")
@@ -414,14 +410,6 @@ def render_audit() -> None:
                 use_container_width=True,
                 hide_index=True,
             )
-            accessorial_variance = _numeric_value(
-                selected.get("accessorial_variance")
-            )
-            if accessorial_variance is not None and accessorial_variance > 0:
-                st.warning(
-                    "The source invoice contains one aggregate accessorial amount; "
-                    "its fee type (for example, liftgate or detention) is not recorded."
-                )
             if not selected["receipt_found"]:
                 st.warning("No warehouse receipt was found for this purchase order.")
             else:
@@ -441,11 +429,8 @@ def render_audit() -> None:
 
             if not showing_history:
                 st.markdown("#### Resolution")
-                auditor_name = st.text_input(
-                    "Auditor name", key="auditor_name"
-                )
                 audit_note = st.text_area(
-                    "Resolution notes / rationale",
+                    "Resolution notes / rationale (optional)",
                     key=f"audit_note_{selected_id}",
                     placeholder=(
                         "Record evidence, approval rationale, or the carrier action "
@@ -467,16 +452,12 @@ def render_audit() -> None:
                         key=f"action_{audit_status}_{selected_id}",
                         use_container_width=True,
                     ):
-                        if not auditor_name.strip() or not audit_note.strip():
-                            st.error("Enter an auditor name and resolution note first.")
-                        else:
-                            _save_resolution(
-                                client,
-                                selected_id,
-                                audit_status,
-                                auditor_name,
-                                audit_note,
-                            )
+                        _save_resolution(
+                            client,
+                            selected_id,
+                            audit_status,
+                            audit_note,
+                        )
 
             if selected["reconciliation_status"] == DISCREPANCY_FLAGGED or (
                 selected["audit_status"] == "DISPUTED"
@@ -510,7 +491,6 @@ def render_audit() -> None:
                                 column
                                 for column in (
                                     "created_at",
-                                    "auditor_name",
                                     "previous_status",
                                     "audit_status",
                                     "audit_note",

@@ -93,7 +93,6 @@ def update_invoice_audit(
     client,
     invoice_number: str,
     audit_status: str,
-    auditor_name: str,
     audit_note: str,
 ) -> None:
     """Write a resolution to Supabase; a database trigger records the audit event."""
@@ -101,17 +100,12 @@ def update_invoice_audit(
         raise ValueError(f"Unsupported audit status: {audit_status}")
     if not invoice_number.strip():
         raise ValueError("invoice_number must not be empty")
-    if not auditor_name.strip():
-        raise ValueError("auditor_name must not be empty")
-    if not audit_note.strip():
-        raise ValueError("audit_note must not be empty")
 
     response = (
         client.table("carrier_invoices")
         .update(
             {
                 "audit_status": audit_status,
-                "auditor_name": auditor_name.strip(),
                 "audit_note": audit_note.strip(),
                 "audited_at": datetime.now(timezone.utc).isoformat(),
             }
@@ -134,4 +128,3 @@ def fetch_invoice_audit_events(client, invoice_number: str) -> list[dict[str, ob
         .execute()
     )
     return response.data or []
-

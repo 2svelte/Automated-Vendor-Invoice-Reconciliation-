@@ -97,7 +97,6 @@ def test_update_invoice_audit_writes_resolution_and_requires_matching_invoice():
         client,
         "INV-1",
         "DISPUTED",
-        "Alex Auditor",
         "Unapproved accessorial; dispute sent.",
     )
 
@@ -105,16 +104,27 @@ def test_update_invoice_audit_writes_resolution_and_requires_matching_invoice():
     values = client.table_instance.values
     assert values is not None
     assert values["audit_status"] == "DISPUTED"
-    assert values["auditor_name"] == "Alex Auditor"
     assert values["audit_note"] == "Unapproved accessorial; dispute sent."
     assert values["audited_at"]
+    assert "auditor_name" not in values
+
+
+def test_update_invoice_audit_allows_empty_resolution_note():
+    client = FakeUpdateClient([{"invoice_number": "INV-1"}])
+
+    update_invoice_audit(client, "INV-1", "UNDER_REVIEW", "")
+
+    values = client.table_instance.values
+    assert values is not None
+    assert values["audit_status"] == "UNDER_REVIEW"
+    assert values["audit_note"] == ""
 
 
 def test_update_invoice_audit_rejects_missing_invoice():
     client = FakeUpdateClient([])
 
     try:
-        update_invoice_audit(client, "INV-404", "DISPUTED", "Alex", "Reason")
+        update_invoice_audit(client, "INV-404", "DISPUTED", "Reason")
     except LookupError as error:
         assert "INV-404" in str(error)
     else:
