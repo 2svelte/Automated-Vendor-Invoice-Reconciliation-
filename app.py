@@ -386,7 +386,9 @@ def render_audit() -> None:
         )
         selected = visible.loc[visible["invoice_number"].eq(selected_id)].iloc[0]
         st.subheader(
-            f"{selected_id} — {_exception_reasons(selected, weight_tolerance_pct)}"
+            f"{selected_id} — "
+            f"{AUDIT_STATUS_LABELS.get(selected['audit_status'], selected['status'])} · "
+            f"{_exception_reasons(selected, weight_tolerance_pct)}"
         )
         with st.container():
             st.caption(
@@ -401,20 +403,16 @@ def render_audit() -> None:
             if not selected["receipt_found"]:
                 st.warning("No warehouse receipt was found for this purchase order.")
 
-            st.write(
-                f"Current audit status: **"
-                f"{AUDIT_STATUS_LABELS.get(selected['audit_status'], selected['status'])}**"
-            )
-
             if not showing_history:
                 st.markdown("#### Resolution")
                 audit_note = st.text_area(
-                    "Resolution notes / rationale (optional)",
+                    "",
                     key=f"audit_note_{selected_id}",
                     placeholder=(
                         "Record evidence, approval rationale, or the carrier action "
                         "required."
                     ),
+                    label_visibility="collapsed",
                 )
                 action_columns = st.columns(4)
                 actions = (
@@ -444,7 +442,7 @@ def render_audit() -> None:
                 st.markdown("#### Carrier dispute memo")
                 memo_key = f"dispute_memo_{selected_id}"
                 if st.button(
-                    "Generate / Regenerate AI dispute memo",
+                    "Generate / Regenerate dispute memo",
                     key=f"generate_memo_{selected_id}",
                 ):
                     with st.spinner("Drafting dispute memo..."):
@@ -458,12 +456,12 @@ def render_audit() -> None:
                 if memo:
                     if "DETERMINISTIC FALLBACK DRAFT" in memo:
                         st.warning(
-                            "The AI draft is unavailable or no OpenAI API key is "
+                            "Live drafting is unavailable or no OpenAI API key is "
                             "configured. This is a deterministic fallback draft."
                         )
                     else:
                         st.caption(
-                            "AI-generated draft. Review it for accuracy before sending."
+                            "Generated draft. Review it for accuracy before sending."
                         )
                     st.code(memo, language="text")
                     st.download_button(

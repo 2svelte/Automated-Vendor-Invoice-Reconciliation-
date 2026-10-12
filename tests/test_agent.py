@@ -1,4 +1,4 @@
-from src.agent import draft_dispute, fallback_dispute
+from src.agent import _prompt, draft_dispute, fallback_dispute
 
 
 def exception_record():
@@ -25,3 +25,11 @@ def test_fallback_contains_verified_exception_facts():
 def test_draft_without_key_uses_fallback():
     draft = draft_dispute(exception_record(), api_key="")
     assert "DETERMINISTIC FALLBACK" in draft
+
+
+def test_prompt_requires_plain_text_without_markdown_bold_markers():
+    prompt = _prompt(exception_record())
+
+    assert "plain text for an email" in prompt
+    assert "Do not use Markdown" in prompt
+    assert "double-asterisk markers (**)" in prompt

@@ -48,6 +48,8 @@ Requirements:
 - Request a credit memo or supporting contractual documentation.
 - Do not invent dates, rates, terms, evidence, or legal conclusions.
 - Include a two-sentence executive summary followed by the letter.
+- Format the result as plain text for an email. Do not use Markdown or include
+  double-asterisk markers (**), including around headings.
 """
 
 
