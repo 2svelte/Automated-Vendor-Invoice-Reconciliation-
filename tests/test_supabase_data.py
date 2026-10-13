@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 
 from src.reconciliation_engine import DISCREPANCY_FLAGGED
-from src.supabase_data import reconcile_supabase_data, update_invoice_audit
+from src.supabase_data import SOURCE_COLUMNS, reconcile_supabase_data, update_invoice_audit
 
 
 class FakeReadTable:
@@ -58,6 +58,51 @@ class FakeUpdateClient:
     def table(self, name):
         assert name == "carrier_invoices"
         return self.table_instance
+
+
+def test_source_columns_include_extended_document_fields():
+    assert {
+        "bill_to_name",
+        "bill_to_address",
+        "remit_to_name",
+        "remit_to_address",
+        "payment_terms",
+        "payment_due_date",
+        "pickup_date",
+        "delivery_date",
+        "freight_class",
+        "nmfc_code",
+        "rate_tariff_reference",
+        "rate_per_cwt",
+        "handling_unit_count",
+        "handling_unit_type",
+    }.issubset(SOURCE_COLUMNS["carrier_invoices"])
+    assert {
+        "incoterms",
+        "freight_charge_terms",
+        "payment_terms",
+        "equipment_type_required",
+        "temperature_controlled",
+        "liftgate_required",
+        "scheduled_pickup_window",
+        "scheduled_delivery_window",
+        "buyer_contact_email",
+    }.issubset(SOURCE_COLUMNS["purchase_orders"])
+    assert {
+        "driver_name",
+        "driver_cdl_number",
+        "carrier_scac",
+        "tractor_unit_number",
+        "security_seal_number",
+        "security_seal_status",
+        "scale_operator_id",
+        "scale_calibration_date",
+        "yard_check_in_timestamp",
+        "dock_unloaded_timestamp",
+        "yard_departure_timestamp",
+        "received_pallet_count",
+        "packaging_condition",
+    }.issubset(SOURCE_COLUMNS["warehouse_goods_receipts"])
 
 
 def test_reconcile_supabase_data_uses_all_three_source_tables():

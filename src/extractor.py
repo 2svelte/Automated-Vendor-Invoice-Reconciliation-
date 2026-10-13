@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from datetime import date, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -22,6 +23,20 @@ EXPECTED_COLUMNS = [
     "billed_accessorial_fee",
     "billed_weight_lbs",
     "invoice_date",
+    "bill_to_name",
+    "bill_to_address",
+    "remit_to_name",
+    "remit_to_address",
+    "payment_terms",
+    "payment_due_date",
+    "pickup_date",
+    "delivery_date",
+    "freight_class",
+    "nmfc_code",
+    "rate_tariff_reference",
+    "rate_per_cwt",
+    "handling_unit_count",
+    "handling_unit_type",
 ]
 
 
@@ -66,6 +81,39 @@ def parse_carrier_pdf(pdf_path: str | os.PathLike[str]) -> dict[str, object]:
     bol_number = _find_pattern(text, r"(?:Shipper\s*)?BOL\s*(?:Number)?:\s*([A-Za-z0-9-]+)")
     pro_number = _find_pattern(text, r"Carrier\s*PRO\s*Number:\s*([A-Za-z0-9-]+)")
     invoice_date = _find_pattern(text, r"Billing\s*Date:\s*([\d-]+)", default="2026-09-01")
+    bill_to_name = _find_pattern(text, r"Bill\s*To\s*Name:\s*(.+)")
+    bill_to_address = _find_pattern(text, r"Bill\s*To\s*Address:\s*(.+)")
+    remit_to_name = _find_pattern(text, r"Remit\s*To\s*Name:\s*(.+)")
+    remit_to_address = _find_pattern(text, r"Remit\s*To\s*Address:\s*(.+)")
+    payment_terms = _find_pattern(text, r"Payment\s*Terms:\s*(.+)")
+    payment_due_date = _find_pattern(text, r"Payment\s*Due\s*Date:\s*([\d-]+)")
+    if not payment_due_date:
+        terms_days = re.fullmatch(r"\s*Net\s+(\d+)\s*", payment_terms, flags=re.IGNORECASE)
+        if terms_days:
+            payment_due_date = (
+                date.fromisoformat(invoice_date)
+                + timedelta(days=int(terms_days.group(1)))
+            ).isoformat()
+    pickup_date = _find_pattern(text, r"Pickup\s*Date:\s*([\d-]+)")
+    delivery_date = _find_pattern(text, r"Delivery\s*Date:\s*([\d-]+)")
+    freight_class = _find_pattern(text, r"Freight\s*Class:\s*(.+)")
+    nmfc_code = _find_pattern(text, r"NMFC\s*Code:\s*([A-Za-z0-9-]+)")
+    rate_tariff_reference = _find_pattern(
+        text, r"Rate\s*Tariff\s*Reference:\s*([A-Za-z0-9-]+)"
+    )
+    rate_match = re.search(
+        r"Rate\s*Per\s*CWT:\s*\$?\s*([\d,]+(?:\.\d+)?)",
+        text,
+        flags=re.IGNORECASE | re.MULTILINE,
+    )
+    rate_per_cwt = _clean_number(rate_match.group(1)) if rate_match else None
+    handling_unit_count_value = _find_pattern(
+        text, r"Handling\s*Unit\s*Count:\s*(\d+)"
+    )
+    handling_unit_count = (
+        int(handling_unit_count_value) if handling_unit_count_value else None
+    )
+    handling_unit_type = _find_pattern(text, r"Handling\s*Unit\s*Type:\s*(.+)")
 
     carrier_name_match = re.search(r"FREIGHT BILLING INVOICE:\s*([A-Za-z0-9& .-]+)", text, flags=re.IGNORECASE)
     carrier_name = carrier_name_match.group(1).strip() if carrier_name_match else "UNKNOWN"
@@ -131,6 +179,20 @@ def parse_carrier_pdf(pdf_path: str | os.PathLike[str]) -> dict[str, object]:
         "invoice_total_due": total_due,
         "total_amount": total_due,
         "invoice_date": invoice_date,
+        "bill_to_name": bill_to_name,
+        "bill_to_address": bill_to_address,
+        "remit_to_name": remit_to_name,
+        "remit_to_address": remit_to_address,
+        "payment_terms": payment_terms,
+        "payment_due_date": payment_due_date,
+        "pickup_date": pickup_date,
+        "delivery_date": delivery_date,
+        "freight_class": freight_class,
+        "nmfc_code": nmfc_code,
+        "rate_tariff_reference": rate_tariff_reference,
+        "rate_per_cwt": rate_per_cwt,
+        "handling_unit_count": int(handling_unit_count),
+        "handling_unit_type": handling_unit_type,
     }
 
 
@@ -158,6 +220,20 @@ def parse_supabase_invoice_pdf(pdf_path: str | os.PathLike[str]) -> dict[str, ob
         "accessorial_items": parsed["accessorial_items"],
         "accessorial_fees": parsed["billed_accessorial_fee"],
         "billed_accessorial_fee": parsed["billed_accessorial_fee"],
+        "bill_to_name": parsed["bill_to_name"],
+        "bill_to_address": parsed["bill_to_address"],
+        "remit_to_name": parsed["remit_to_name"],
+        "remit_to_address": parsed["remit_to_address"],
+        "payment_terms": parsed["payment_terms"],
+        "payment_due_date": parsed["payment_due_date"],
+        "pickup_date": parsed["pickup_date"],
+        "delivery_date": parsed["delivery_date"],
+        "freight_class": parsed["freight_class"],
+        "nmfc_code": parsed["nmfc_code"],
+        "rate_tariff_reference": parsed["rate_tariff_reference"],
+        "rate_per_cwt": parsed["rate_per_cwt"],
+        "handling_unit_count": parsed["handling_unit_count"],
+        "handling_unit_type": parsed["handling_unit_type"],
     }
 
 

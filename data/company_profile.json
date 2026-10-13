@@ -1,0 +1,9 @@
+{
+  "company_name": "ABC Company",
+  "bill_to_address": "100 Demo Way, Seattle, WA 98101 (FICTIONAL DEMO)",
+  "dispute_contact": {
+    "name": "Nadia R.",
+    "position": "Accounts Payable Manager",
+    "phone": "0412345678"
+  }
+}

@@ -463,8 +463,6 @@ with st.sidebar:
         step=0.25,
         help="Carrier weight may exceed the certified scale weight by this percentage.",
     )
-    if st.button("Refresh Supabase data", type="primary", use_container_width=True):
-        st.rerun()
 
 
 @st.fragment(run_every="15s")
@@ -687,6 +685,7 @@ def render_audit() -> None:
                 st.markdown("#### Carrier dispute memo")
                 memo_key = f"dispute_memo_{selected_id}"
                 generated_key = f"dispute_memo_generated_{selected_id}"
+                unavailable_key = f"dispute_memo_unavailable_{selected_id}"
                 if st.button(
                     _dispute_memo_button_label(
                         st.session_state.get(generated_key, False)
@@ -694,24 +693,26 @@ def render_audit() -> None:
                     key=f"generate_memo_{selected_id}",
                 ):
                     st.session_state[generated_key] = True
+                    st.session_state.pop(memo_key, None)
+                    st.session_state[unavailable_key] = False
                     with st.spinner("Drafting dispute memo..."):
-                        memo = draft_dispute(
-                            selected.to_dict(),
-                            api_key=st.secrets.get("OPENAI_API_KEY"),
-                        )
-                    st.session_state[memo_key] = memo
+                        try:
+                            memo = draft_dispute(
+                                selected.to_dict(),
+                                api_key=st.secrets.get("OPENAI_API_KEY"),
+                            )
+                        except Exception:
+                            st.session_state[unavailable_key] = True
+                        else:
+                            st.session_state[memo_key] = memo
 
                 memo = st.session_state.get(memo_key)
-                if memo:
-                    if "DETERMINISTIC FALLBACK DRAFT" in memo:
-                        st.warning(
-                            "Live drafting is unavailable or no OpenAI API key is "
-                            "configured. This is a deterministic fallback draft."
-                        )
-                    else:
-                        st.caption(
-                            "Generated draft. Review it for accuracy before sending."
-                        )
+                if st.session_state.get(unavailable_key, False):
+                    st.error("AI is currently down. Please try again later.")
+                elif memo:
+                    st.caption(
+                        "Generated draft. Review it for accuracy before sending."
+                    )
                     st.code(memo, language="text")
                     st.download_button(
                         "Download dispute memo",
