@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from html import escape
 from pathlib import Path
 from numbers import Real
 
@@ -47,10 +48,6 @@ def _numeric_value(value: object) -> float | None:
     return number if math.isfinite(number) else None
 
 
-def _is_missing(value: object) -> bool:
-    return _numeric_value(value) is None
-
-
 def format_money(value: object) -> str:
     number = _numeric_value(value)
     if number is None:
@@ -65,59 +62,116 @@ def format_weight(value: object) -> str:
     return f"{number:,.0f} lb"
 
 
-def _exception_reasons(row: pd.Series, weight_tolerance_pct: float = 2.0) -> str:
-    if row.get("reconciliation_status") == TOUCHLESS_APPROVED:
-        return "No discrepancies — within approval thresholds."
+def _money_delta(value: object) -> str:
+    number = _numeric_value(value)
+    if number is None:
+        return "N/A"
+    if number == 0:
+        return "$0.00"
+    return f"{'+' if number > 0 else '-'}${abs(number):,.2f}"
 
-    reasons = []
+
+def _weight_delta(value: object) -> str:
+    number = _numeric_value(value)
+    if number is None:
+        return "N/A"
+    if number == 0:
+        return "0 lb"
+    return f"{number:+,.0f} lb"
+
+
+def _primary_root_cause(row: pd.Series) -> str:
+    if not bool(row.get("receipt_found")):
+        return "⚪ Missing Scale Receipt"
+
+    base_variance = _numeric_value(row.get("base_variance")) or 0.0
+    fuel_variance = _numeric_value(row.get("fuel_variance")) or 0.0
     unauthorized_items = row.get("unauthorized_accessorial_items", [])
-    if isinstance(unauthorized_items, list) and unauthorized_items:
-        reasons.extend(
-            (
-                f"Unauthorized accessorial {item.get('code') or 'UNKNOWN'} "
-                f"({item.get('description') or 'description unavailable'}): "
-                f"{format_money(item.get('overage'))}."
-            )
+    accessorial_codes = sorted(
+        {
+            str(item.get("code") or "UNKNOWN").strip().upper()
             for item in unauthorized_items
+            if isinstance(item, dict)
+        }
+    ) if isinstance(unauthorized_items, list) else []
+
+    if accessorial_codes:
+        if len(accessorial_codes) > 1:
+            return f"🔴 Unapproved {' & '.join(accessorial_codes)}"
+        code = accessorial_codes[0]
+        matching_item = next(
+            (
+                item
+                for item in unauthorized_items
+                if isinstance(item, dict)
+                and str(item.get("code") or "UNKNOWN").strip().upper() == code
+            ),
+            {},
         )
-    for column, label, include_currency in (
-        ("base_variance", "Base rate", False),
-        ("fuel_variance", "Fuel surcharge", False),
-        ("accessorial_variance", "Accessorial", True),
-    ):
-        value = _numeric_value(row.get(column))
-        if value is not None and value > 0 and not (
-            column == "accessorial_variance" and unauthorized_items
-        ):
-            amount = format_money(value) if include_currency else f"{value:,.2f}"
-            reasons.append(f"{label}: {amount} over.")
+        description = str(matching_item.get("description") or "").strip()
+        if description.startswith("Driver "):
+            description = description.removeprefix("Driver ")
+        fee_cause = f"{description} ({code})" if description else code
+        if base_variance > 0:
+            return f"🔴 Base + {fee_cause}"
+        return f"🔴 Unapproved {code}"
 
-    weight_variance = _numeric_value(row.get("weight_variance_lbs"))
-    if weight_variance is not None and weight_variance > 0:
-        reasons.append(
-            f"Carrier weight exceeds the {weight_tolerance_pct:g}% buffer by "
-            f"{format_weight(weight_variance)}."
-        )
-
-    if row.get("reconciliation_status") == REVIEW_INCOMPLETE:
-        reasons.append("Missing receipt.")
-    return " ".join(reasons) if reasons else "Review required."
+    if base_variance > 0 and fuel_variance > 0:
+        return "🟡 Base + Fuel Variance"
+    if base_variance > 0:
+        return "🔴 Base Rate Variance"
+    if fuel_variance > 0:
+        return "🟡 Fuel Index Pegged"
+    if (_numeric_value(row.get("weight_variance_lbs")) or 0.0) > 0:
+        return "🔴 Weight Overweight"
+    return "🟡 Review Required"
 
 
-def highlight_worklist(frame: pd.DataFrame):
-    def row_style(row: pd.Series) -> list[str]:
-        group = row.get("Queue")
-        if group == "Disputed / flagged":
-            color = "background-color: #fde2e0; color: #781d18"
-        elif group == "Under review":
-            color = "background-color: #fff4cc; color: #654b00"
-        elif group == "Auto-approved":
-            color = "background-color: #e2f4e8; color: #195b31"
-        else:
-            color = ""
-        return [color] * len(row)
-
-    return frame.style.apply(row_style, axis=1)
+def _workbench_table_html(
+    frame: pd.DataFrame,
+    *,
+    table_class: str,
+    column_widths: list[int],
+) -> str:
+    header = "".join(
+        f'<th scope="col" style="width:{width}%">{escape(str(column))}</th>'
+        for column, width in zip(frame.columns, column_widths, strict=True)
+    )
+    rows = []
+    for _, row in frame.iterrows():
+        cells = []
+        status = str(row.get("Status", ""))
+        for column, value in row.items():
+            text = str(value)
+            classes = []
+            if column == "Status":
+                classes.append("status-cell")
+                if status == DISCREPANCY_FLAGGED:
+                    classes.append("status-flagged")
+                elif status == REVIEW_REQUIRED:
+                    classes.append("status-review")
+                elif status == REVIEW_INCOMPLETE:
+                    classes.append("status-incomplete")
+                elif status == TOUCHLESS_APPROVED:
+                    classes.append("status-approved")
+            elif column == "Receipt":
+                classes.append("receipt-found" if text == "Found" else "receipt-missing")
+            elif column == "Discrepancy (Total Δ)" and status == DISCREPANCY_FLAGGED:
+                classes.append("discrepancy-flagged")
+            elif column == "Variance" and (
+                text.startswith("+") or "Overweight" in text
+            ):
+                classes.append("variance-flagged")
+            class_attribute = f' class="{" ".join(classes)}"' if classes else ""
+            escaped_text = escape(text)
+            cells.append(
+                f"<td{class_attribute} title=\"{escaped_text}\">{escaped_text}</td>"
+            )
+        rows.append(f"<tr>{''.join(cells)}</tr>")
+    return (
+        f'<div class="workbench-table-wrap"><table class="workbench-table {table_class}">'
+        f"<thead><tr>{header}</tr></thead><tbody>{''.join(rows)}</tbody></table></div>"
+    )
 
 
 def _comparison_table(row: pd.Series) -> pd.DataFrame:
@@ -127,128 +181,104 @@ def _comparison_table(row: pd.Series) -> pd.DataFrame:
     scale_weight = _numeric_value(
         row.get("certified_net_scale_weight", row.get("actual_scale_weight_lbs"))
     )
-    expected_weight = row.get(
-        "contracted_expected_weight", row.get("expected_weight")
+    expected_weight = _numeric_value(
+        row.get("contracted_expected_weight", row.get("expected_weight"))
     )
-    components = [
-        (
-            "Base freight",
-            row.get("billed_base_freight"),
-            row.get("contracted_base_rate", row.get("contracted_base_freight")),
-            None,
-            row.get("base_variance"),
-            "money",
-        ),
-        (
-            "Fuel surcharge",
-            row.get("billed_fuel_surcharge"),
-            row.get("contracted_fuel_surcharge", row.get("agreed_fuel_surcharge")),
-            None,
-            row.get("fuel_variance"),
-            "money",
-        ),
-        (
-            "Chargeable weight",
-            billed_weight,
-            expected_weight,
-            scale_weight,
-            billed_weight - scale_weight
-            if billed_weight is not None and scale_weight is not None
-            else None,
-            "weight",
-        ),
+    result = [
+        {
+            "Component": "Base freight",
+            "Invoiced (Carrier)": format_money(row.get("billed_base_freight")),
+            "Authorized (PO)": format_money(
+                row.get("contracted_base_rate", row.get("contracted_base_freight"))
+            ),
+            "Physical (WMS)": "—",
+            "Variance": _money_delta(row.get("base_variance")),
+        },
+        {
+            "Component": "Fuel surcharge",
+            "Invoiced (Carrier)": format_money(row.get("billed_fuel_surcharge")),
+            "Authorized (PO)": format_money(
+                row.get("contracted_fuel_surcharge", row.get("agreed_fuel_surcharge"))
+            ),
+            "Physical (WMS)": "—",
+            "Variance": _money_delta(row.get("fuel_variance")),
+        },
     ]
-    result = []
-    for label, billed, authorized, physical, delta, kind in components:
-        if kind == "money":
-            result.append(
-                {
-                    "Component": label,
-                    "Invoiced (Carrier)": format_money(billed),
-                    "Authorized (PO)": format_money(authorized),
-                    "Physical (WMS)": "—",
-                    "Variance": format_money(delta),
-                }
-            )
-        else:
-            result.append(
-                {
-                    "Component": label,
-                    "Invoiced (Carrier)": format_weight(billed),
-                    "Authorized (PO)": format_weight(authorized),
-                    "Physical (WMS)": format_weight(physical),
-                    "Variance": (
-                        "N/A"
-                        if _is_missing(delta)
-                        else f"{delta:+,.0f} lb"
-                    ),
-                }
-            )
-    for label, column in (
-        ("Truck + trailer + cargo gross weight", "gross_weight_lbs"),
-        ("Empty truck + trailer tare weight", "tare_weight_lbs"),
-    ):
-        result.append(
-            {
-                "Component": label,
-                "Invoiced (Carrier)": "—",
-                "Authorized (PO)": "—",
-                "Physical (WMS)": format_weight(row.get(column)),
-                "Variance": "—",
-            }
-        )
+
     billed_items = row.get("accessorial_items", [])
     approved_items = row.get("approved_accessorial_items", [])
-    legacy_allowance = _numeric_value(row.get("max_accessorial_allowance"))
-    if (
-        isinstance(billed_items, list)
-        and billed_items
-        and isinstance(approved_items, list)
-        and (approved_items or legacy_allowance in (None, 0.0))
-    ):
+    if isinstance(billed_items, list) and billed_items:
+        approved_by_code: dict[str, float] = {}
+        if isinstance(approved_items, list):
+            for item in approved_items:
+                code = str(item.get("code", "")).strip().upper()
+                amount = _numeric_value(item.get("amount")) or 0.0
+                approved_by_code[code] = approved_by_code.get(code, 0.0) + amount
         billed_by_code: dict[str, dict[str, object]] = {}
         for item in billed_items:
             code = str(item.get("code", "")).strip().upper()
             entry = billed_by_code.setdefault(
                 code,
-                {
-                    "description": str(item.get("description", "")).strip(),
-                    "amount": 0.0,
-                },
+                {"description": str(item.get("description", "")).strip(), "amount": 0.0},
             )
-            entry["amount"] = float(entry["amount"]) + float(item.get("amount", 0))
-        approved_by_code: dict[str, float] = {}
-        if isinstance(approved_items, list):
-            for item in approved_items:
-                code = str(item.get("code", "")).strip().upper()
-                approved_by_code[code] = approved_by_code.get(code, 0.0) + float(
-                    item.get("amount", 0)
-                )
-        accessorial_rows = []
+            entry["amount"] = float(entry["amount"]) + (
+                _numeric_value(item.get("amount")) or 0.0
+            )
         for code, item in billed_by_code.items():
             billed_amount = float(item["amount"])
-            approved_amount = approved_by_code.get(code, 0.0)
-            accessorial_rows.append(
+            authorized_amount = approved_by_code.get(code, 0.0)
+            result.append(
                 {
                     "Component": f"Accessorial — {code or 'UNKNOWN'}: {item['description']}",
                     "Invoiced (Carrier)": format_money(billed_amount),
-                    "Authorized (PO)": format_money(approved_amount),
+                    "Authorized (PO)": format_money(authorized_amount),
                     "Physical (WMS)": "—",
-                    "Variance": format_money(max(0.0, billed_amount - approved_amount)),
+                    "Variance": _money_delta(billed_amount - authorized_amount),
                 }
             )
-        result[2:2] = accessorial_rows
     else:
-        result.insert(
-            2,
+        result.append(
             {
                 "Component": "Accessorial fees (legacy aggregate)",
                 "Invoiced (Carrier)": format_money(row.get("billed_accessorial_fee")),
                 "Authorized (PO)": format_money(row.get("max_accessorial_allowance")),
                 "Physical (WMS)": "—",
-                "Variance": format_money(row.get("accessorial_variance")),
-            },
+                "Variance": _money_delta(row.get("accessorial_variance")),
+            }
         )
+
+    weight_difference = billed_weight - scale_weight if (
+        billed_weight is not None and scale_weight is not None
+    ) else None
+    overweight = (_numeric_value(row.get("weight_variance_lbs")) or 0.0) > 0
+    weight_variance_label = _weight_delta(weight_difference)
+    if overweight and weight_difference is not None:
+        weight_variance_label += " ⚠ Overweight"
+    result.extend(
+        [
+            {
+                "Component": "├─ Gross Vehicle Wt",
+                "Invoiced (Carrier)": "—",
+                "Authorized (PO)": "—",
+                "Physical (WMS)": format_weight(row.get("gross_weight_lbs")),
+                "Variance": "—",
+            },
+            {
+                "Component": "└─ Empty truck + trailer tare weight",
+                "Invoiced (Carrier)": "—",
+                "Authorized (PO)": "—",
+                "Physical (WMS)": format_weight(row.get("tare_weight_lbs")),
+                "Variance": "—",
+            },
+            {
+                "Component": "Chargeable / certified net weight",
+                "Invoiced (Carrier)": format_weight(billed_weight),
+                "Authorized (PO)": format_weight(expected_weight),
+                "Physical (WMS)": format_weight(scale_weight),
+                "Variance": weight_variance_label,
+            },
+        ]
+    )
     return pd.DataFrame(result)
 
 
@@ -283,6 +313,84 @@ st.markdown(
     [data-testid="stMultiSelectTagsContainer"] span,
     [data-testid="stBaseButton-header"] span {
         font-size: 20px !important;
+    }
+    [data-testid="stMarkdownContainer"] h3 {
+        font-size: 18px !important;
+    }
+    [data-testid="stMarkdownContainer"] h4 {
+        font-size: 16px !important;
+    }
+    .workbench-table-wrap {
+        width: 100%;
+        overflow-x: auto;
+        margin-bottom: 0.75rem;
+    }
+    table.worklist-table {
+        min-width: 1180px;
+    }
+    table.workbench-table {
+        width: 100%;
+        table-layout: fixed;
+        border-collapse: collapse;
+        font-size: 16px;
+        line-height: 1.4;
+    }
+    table.workbench-table th,
+    table.workbench-table td {
+        border: 1px solid #34383f;
+        padding: 3px 2px;
+        text-align: left;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    table.workbench-table th {
+        background: #15191f;
+        color: #f1f3f5;
+        font-weight: 600;
+        white-space: normal;
+    }
+    table.workbench-table td {
+        background: #0e1117;
+    }
+    table.workbench-table .status-cell,
+    table.workbench-table .receipt-found,
+    table.workbench-table .receipt-missing {
+        color: #fff;
+        text-align: center;
+        font-size: 14px;
+        font-weight: 600;
+    }
+    table.workbench-table .status-flagged,
+    table.workbench-table .receipt-missing {
+        background: #c63b40;
+    }
+    table.workbench-table .status-review {
+        background: #b58800;
+    }
+    table.workbench-table .status-incomplete {
+        background: #c66a16;
+    }
+    table.workbench-table .status-approved,
+    table.workbench-table .receipt-found {
+        background: #18834b;
+    }
+    table.workbench-table .discrepancy-flagged {
+        background: #dc454b;
+        color: #fff;
+        font-weight: 700;
+        text-align: right;
+    }
+    table.workbench-table .variance-flagged {
+        color: #e46b6b;
+        font-weight: 600;
+        text-align: right;
+    }
+    table.reconciliation-table td:not(:first-child) {
+        text-align: right;
+    }
+    table.reconciliation-table td:first-child {
+        white-space: normal;
     }
     </style>
     """,
@@ -396,7 +504,7 @@ def render_audit() -> None:
     )
 
     st.subheader(
-        "Exception queue"
+        "Exception Queue"
         if not showing_history
         else "Audit history and approved invoices"
     )
@@ -405,102 +513,53 @@ def render_audit() -> None:
     else:
         display = pd.DataFrame(
             {
-                "Invoice": visible["invoice_number"],
+                "Invoice ID": visible["invoice_number"],
                 "Carrier": visible["carrier_name"],
-                "PO": visible["po_number"],
-                "Status": visible.apply(
-                    lambda row: AUDIT_STATUS_LABELS.get(
-                        row["audit_status"], row["status"]
-                    ),
-                    axis=1,
-                ),
-                "Variance detail": visible.apply(
-                    lambda row: _exception_reasons(row, weight_tolerance_pct),
-                    axis=1,
-                ),
-                "Discrepancy": visible["total_overbill"].map(format_money),
-                "Weight delta": visible["weight_variance_lbs"].map(format_weight),
+                "PO Number": visible["po_number"],
+                "Status": visible["status"],
+                "Primary Root Cause": visible.apply(_primary_root_cause, axis=1),
+                "Base Δ": visible["base_variance"].map(_money_delta),
+                "Fuel Δ": visible["fuel_variance"].map(_money_delta),
+                "Acc Δ": visible["accessorial_variance"].map(_money_delta),
+                "Wt Δ": visible["weight_variance_lbs"].map(_weight_delta),
+                "Discrepancy (Total Δ)": visible["total_overbill"].map(format_money),
                 "Receipt": visible["receipt_found"].map(
                     lambda found: "Found" if bool(found) else "Missing"
                 ),
             }
         )
-        if not showing_history:
-            display["Queue"] = visible.apply(
-                lambda row: (
-                    "Disputed / flagged"
-                    if row["reconciliation_status"] == DISCREPANCY_FLAGGED
-                    else "Under review"
-                ),
-                axis=1,
-            )
-        else:
-            display["Queue"] = visible.apply(
-                lambda row: (
-                    "Disputed / flagged"
-                    if row["audit_status"] == "DISPUTED"
-                    else (
-                        "Auto-approved"
-                        if row["audit_status"] == "OVERRIDE_APPROVED"
-                        or row["reconciliation_status"] == TOUCHLESS_APPROVED
-                        else "Under review"
-                    )
-                ),
-                axis=1,
-            )
-        st.dataframe(
-            highlight_worklist(display),
-            use_container_width=True,
-            hide_index=True,
-            column_config={"Queue": None},
+        st.markdown(
+            _workbench_table_html(
+                display,
+                table_class="worklist-table",
+                column_widths=[8, 11, 8, 14, 19, 6, 6, 6, 6, 10, 6],
+            ),
+            unsafe_allow_html=True,
         )
 
         selected_id = st.selectbox(
-            "Open invoice",
+            "Select invoice",
             visible["invoice_number"].tolist(),
             index=0,
             key=f"invoice_selector_{worklist_view}",
         )
         selected = visible.loc[visible["invoice_number"].eq(selected_id)].iloc[0]
-        st.subheader(
-            f"{selected_id}: {selected['status']}. "
-            f"{_exception_reasons(selected, weight_tolerance_pct)}"
-        )
         with st.container():
-            st.caption(
-                f"{selected['carrier_name']} · PO {selected['po_number']} · "
-                f"{selected['origin']} → {selected['destination']}"
-            )
-            invoice_pro = selected.get("pro_number")
-            invoice_bol = selected.get("bol_number")
-            st.caption(
-                f"Carrier PRO {invoice_pro if isinstance(invoice_pro, str) and invoice_pro else 'unavailable'} "
-                f"· BOL {invoice_bol if isinstance(invoice_bol, str) and invoice_bol else 'unavailable'} "
-                f"· Invoice total due {format_money(selected.get('invoice_total_due', selected.get('total_amount')))}"
-            )
-            receipt_id = selected.get("receipt_id")
-            scale_ticket_id = selected.get("scale_ticket_id")
-            receiving_dock = selected.get("receiving_dock_door")
-            receipt_details = [
-                f"Receipt {receipt_id if isinstance(receipt_id, str) and receipt_id else 'ID unavailable'}",
-                f"Scale ticket {scale_ticket_id if isinstance(scale_ticket_id, str) and scale_ticket_id else 'ID unavailable'}",
-                f"Dock {receiving_dock if isinstance(receiving_dock, str) and receiving_dock else 'unavailable'}",
-                f"Certified net {format_weight(selected.get('certified_net_scale_weight', selected.get('actual_scale_weight_lbs')))}",
-            ]
-            receipt_seal = selected.get("scale_certification_seal")
-            if receipt_seal:
-                receipt_details.append(f"Scale certification {receipt_seal}")
-            st.caption(" · ".join(receipt_details))
-            st.dataframe(
-                _comparison_table(selected),
-                use_container_width=True,
-                hide_index=True,
+            if not selected["receipt_found"]:
+                st.warning("No warehouse receipt was found for this purchase order.")
+            st.markdown("#### 3-Way Reconciliation")
+            comparison = _comparison_table(selected)
+            st.markdown(
+                _workbench_table_html(
+                    comparison,
+                    table_class="reconciliation-table",
+                    column_widths=[29, 18, 18, 18, 17],
+                ),
+                unsafe_allow_html=True,
             )
             osd_notes = selected.get("osd_notes")
             if isinstance(osd_notes, str) and osd_notes.strip():
                 st.warning(f"Warehouse OS&D note: {osd_notes}")
-            if not selected["receipt_found"]:
-                st.warning("No warehouse receipt was found for this purchase order.")
 
             if not showing_history:
                 st.markdown("#### Resolution")
