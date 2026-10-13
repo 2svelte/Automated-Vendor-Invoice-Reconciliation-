@@ -6,6 +6,7 @@ from src.reconciliation_engine import (
     REVIEW_INCOMPLETE,
     TOUCHLESS_APPROVED,
     reconcile,
+    summarize_carrier_billing,
     summarize,
     write_discrepancy_queue,
 )
@@ -138,6 +139,47 @@ def test_summary_calculates_stp_and_prevented_spend():
     assert metrics["touchless_count"] == 1
     assert metrics["stp_rate"] == 0.5
     assert metrics["prevented_overbill"] == 50
+
+
+def test_carrier_billing_summary_uses_reconciled_variances_and_nets_offsets():
+    audited = pd.DataFrame(
+        [
+            {
+                "carrier_name": "Northstar",
+                "base_variance": 0,
+                "fuel_variance": 0,
+                "accessorial_variance": 0,
+                "total_overbill": 0,
+            },
+            {
+                "carrier_name": "Northstar",
+                "base_variance": 60,
+                "fuel_variance": 10,
+                "accessorial_variance": 0,
+                "total_overbill": 70,
+            },
+            {
+                "carrier_name": "Atlas",
+                "base_variance": 10,
+                "fuel_variance": -5,
+                "accessorial_variance": 5,
+                "total_overbill": 10,
+            },
+        ]
+    )
+
+    carrier_summary, leakage_summary = summarize_carrier_billing(audited)
+
+    northstar = carrier_summary.set_index("Carrier").loc["Northstar"]
+    assert northstar["Invoices"] == 2
+    assert northstar["Clean invoices"] == 1
+    assert northstar["Accuracy index"] == pytest.approx(0.5)
+    assert northstar["Primary leakage driver"] == "Base rate inflation"
+    assert leakage_summary["Amount"].sum() == pytest.approx(80)
+    assert leakage_summary["Share"].sum() == pytest.approx(1)
+    atlas_leakage = leakage_summary.set_index("Leakage category")["Amount"]
+    assert atlas_leakage["Base rate inflation"] == pytest.approx(60 + 10 * (10 / 15))
+    assert atlas_leakage["Accessorial creep"] == pytest.approx(5 * (10 / 15))
 
 
 def test_discrepancy_queue_writes_power_automate_contract(tmp_path):

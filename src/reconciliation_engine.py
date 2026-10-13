@@ -310,6 +310,93 @@ def summarize(reconciled: pd.DataFrame) -> dict[str, float | int]:
     }
 
 
+def summarize_carrier_billing(
+    reconciled: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Summarize exact billing accuracy by carrier and attribute net overbill."""
+    variance_columns = {
+        "Base rate inflation": "base_variance",
+        "Fuel index slippage": "fuel_variance",
+        "Accessorial creep": "accessorial_variance",
+    }
+    variances = reconciled[list(variance_columns.values())].apply(
+        pd.to_numeric, errors="coerce"
+    )
+    clean = variances.eq(0).all(axis=1)
+    positive_variances = variances.fillna(0).clip(lower=0)
+    positive_total = positive_variances.sum(axis=1)
+    net_overbill = (
+        pd.to_numeric(reconciled["total_overbill"], errors="coerce")
+        .fillna(0)
+        .clip(lower=0)
+    )
+    allocation = net_overbill.div(positive_total.where(positive_total.gt(0), 1)).where(
+        positive_total.gt(0), 0
+    )
+    attributed_variances = positive_variances.mul(allocation, axis=0)
+    carrier_names = reconciled["carrier_name"].fillna("Unknown carrier").astype(str)
+
+    carrier_rows = pd.DataFrame(
+        {
+            "Carrier": carrier_names,
+            "Clean": clean,
+            "Overbill exposure": net_overbill,
+        }
+    )
+    carrier_summary = (
+        carrier_rows.groupby("Carrier", as_index=False, sort=False)
+        .agg(
+            Invoices=("Clean", "size"),
+            **{
+                "Clean invoices": ("Clean", "sum"),
+                "Overbill exposure": ("Overbill exposure", "sum"),
+            },
+        )
+    )
+    carrier_summary["Accuracy index"] = (
+        carrier_summary["Clean invoices"] / carrier_summary["Invoices"]
+    )
+
+    carrier_variances = attributed_variances.copy()
+    carrier_variances["Carrier"] = carrier_names
+    carrier_variances = carrier_variances.groupby("Carrier", sort=False).sum()
+    variance_labels = {
+        variance_column: label for label, variance_column in variance_columns.items()
+    }
+    driver_by_carrier = {
+        carrier: (
+            variance_labels[values.idxmax()]
+            if values.max() > 0
+            else "No overbill detected"
+        )
+        for carrier, values in carrier_variances.iterrows()
+    }
+    carrier_summary["Primary leakage driver"] = carrier_summary["Carrier"].map(
+        driver_by_carrier
+    )
+    carrier_summary = carrier_summary.sort_values(
+        ["Overbill exposure", "Accuracy index", "Carrier"],
+        ascending=[False, True, True],
+        ignore_index=True,
+    )
+
+    category_amounts = (
+        attributed_variances.sum()
+        .rename(index=variance_labels)
+        .rename("Amount")
+        .rename_axis("Leakage category")
+    )
+    leakage_summary = category_amounts.reset_index()
+    total_leakage = float(net_overbill.sum())
+    leakage_summary["Share"] = (
+        leakage_summary["Amount"] / total_leakage if total_leakage else 0.0
+    )
+    leakage_summary = leakage_summary.sort_values(
+        "Amount", ascending=False, ignore_index=True
+    )
+    return carrier_summary, leakage_summary
+
+
 def discrepancy_records(reconciled: pd.DataFrame) -> Iterable[dict]:
     """Yield JSON-friendly records for the dispute agent or workflow adapters."""
     flagged = reconciled[reconciled["status"].isin([DISCREPANCY_FLAGGED, REVIEW_INCOMPLETE])]

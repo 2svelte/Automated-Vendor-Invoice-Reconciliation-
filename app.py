@@ -9,6 +9,7 @@ from numbers import Real
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 from src.agent import draft_dispute
 from src.reconciliation_engine import (
@@ -16,6 +17,7 @@ from src.reconciliation_engine import (
     REVIEW_INCOMPLETE,
     REVIEW_REQUIRED,
     TOUCHLESS_APPROVED,
+    summarize_carrier_billing,
     summarize,
     write_discrepancy_queue,
 )
@@ -53,6 +55,55 @@ def format_money(value: object) -> str:
     if number is None:
         return "N/A"
     return f"${number:,.2f}"
+
+
+def _format_invoice_accuracy(
+    accuracy: float, clean_invoices: int, invoice_count: int
+) -> str:
+    if accuracy >= 1:
+        indicator = "🟢"
+    elif accuracy >= 0.5:
+        indicator = "🟡"
+    else:
+        indicator = "🔴"
+    return (
+        f"{indicator} {accuracy:.0%} "
+        f"({clean_invoices} / {invoice_count} Clean)"
+    )
+
+
+def _dispute_memo_button_label(has_generated: bool) -> str:
+    return "Regenerate dispute memo" if has_generated else "Generate dispute memo"
+
+
+def _leakage_chart_html(leakage_summary: pd.DataFrame) -> str:
+    max_amount = float(leakage_summary["Amount"].max()) if not leakage_summary.empty else 0
+    rows = []
+    for _, row in leakage_summary.iterrows():
+        amount = float(row["Amount"])
+        bar_width = amount / max_amount * 55 if max_amount > 0 else 0
+        label = f"{format_money(amount)} ({float(row['Share']):.1%})"
+        rows.append(
+            f"""
+            <div style="display:flex;align-items:center;gap:0.75rem;margin:0.55rem 0;"
+                 role="img" aria-label="{escape(str(row['Leakage category']))}: {escape(label)}">
+              <div style="flex:0 0 11rem;color:#fff;font-size:0.9rem;text-shadow:0 1px 2px rgba(0,0,0,0.85);">
+                {escape(str(row['Leakage category']))}
+              </div>
+              <div style="height:1.5rem;flex:1;position:relative;">
+                <div style="height:100%;width:{bar_width:.2f}%;background:#3b82f6;border-radius:0.25rem;"></div>
+                <div style="position:absolute;left:calc({bar_width:.2f}% + 0.5rem);top:50%;transform:translateY(-50%);color:#fff;font-size:0.9rem;font-weight:600;white-space:nowrap;text-shadow:0 1px 2px rgba(0,0,0,0.85);">
+                  {escape(label)}
+                </div>
+              </div>
+            </div>
+            """
+        )
+    return (
+        '<div style="width:100%;font-family:\'Source Sans Pro\',sans-serif;font-size:14px;">'
+        + "".join(rows)
+        + "</div>"
+    )
 
 
 def format_weight(value: object) -> str:
@@ -250,10 +301,7 @@ def _comparison_table(row: pd.Series) -> pd.DataFrame:
     weight_difference = billed_weight - scale_weight if (
         billed_weight is not None and scale_weight is not None
     ) else None
-    overweight = (_numeric_value(row.get("weight_variance_lbs")) or 0.0) > 0
     weight_variance_label = _weight_delta(weight_difference)
-    if overweight and weight_difference is not None:
-        weight_variance_label += " ⚠ Overweight"
     result.extend(
         [
             {
@@ -454,6 +502,45 @@ def render_audit() -> None:
     kpis[2].metric("Discrepancy amount", f"+{format_money(metrics['prevented_overbill'])}")
     kpis[3].metric("Open exception backlog", f"{len(exception_rows):,}")
 
+    carrier_summary, leakage_summary = summarize_carrier_billing(audited)
+    with st.expander("Carrier Billing Performance & Analytics"):
+        st.markdown("**Carrier billing accuracy**")
+        carrier_display = carrier_summary.copy()
+        carrier_display["Invoice Accuracy (Zero-Variance Matches)"] = (
+            carrier_display.apply(
+                lambda row: _format_invoice_accuracy(
+                    row["Accuracy index"],
+                    int(row["Clean invoices"]),
+                    int(row["Invoices"]),
+                ),
+                axis=1,
+            )
+        )
+        carrier_display["Recoverable Discrepancy ($)"] = carrier_display[
+            "Overbill exposure"
+        ].map(format_money)
+        st.dataframe(
+            carrier_display[
+                [
+                    "Carrier",
+                    "Invoice Accuracy (Zero-Variance Matches)",
+                    "Recoverable Discrepancy ($)",
+                    "Primary leakage driver",
+                ]
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.markdown("**Financial leakage breakdown**")
+        components.html(
+            _leakage_chart_html(leakage_summary),
+            height=max(90, len(leakage_summary) * 48 + 20),
+            scrolling=False,
+        )
+        st.caption(
+            "* Financial leakage excludes weight variances pending certified scale/cube dispute."
+        )
+
     queue_view_label = f"Exception Queue ({len(exception_rows):,})"
     history_view_label = f"Audit History / Approved ({len(history_rows):,})"
     worklist_view = st.radio(
@@ -599,10 +686,14 @@ def render_audit() -> None:
             ):
                 st.markdown("#### Carrier dispute memo")
                 memo_key = f"dispute_memo_{selected_id}"
+                generated_key = f"dispute_memo_generated_{selected_id}"
                 if st.button(
-                    "Generate / Regenerate dispute memo",
+                    _dispute_memo_button_label(
+                        st.session_state.get(generated_key, False)
+                    ),
                     key=f"generate_memo_{selected_id}",
                 ):
+                    st.session_state[generated_key] = True
                     with st.spinner("Drafting dispute memo..."):
                         memo = draft_dispute(
                             selected.to_dict(),
