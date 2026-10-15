@@ -70,6 +70,26 @@ class FakeUpdateClient:
         return self.table_instance
 
 
+class FakeRpcClient:
+    def __init__(self, response):
+        self.response = response
+        self.function_name = None
+        self.params = None
+
+    def rpc(self, function_name, params):
+        self.function_name = function_name
+        self.params = params
+        return FakeRpcCall(self.response)
+
+
+class FakeRpcCall:
+    def __init__(self, response):
+        self.response = response
+
+    def execute(self):
+        return SimpleNamespace(data=self.response)
+
+
 def test_source_columns_include_extended_document_fields():
     assert {
         "bill_to_name",
@@ -121,6 +141,14 @@ def test_source_columns_include_extended_document_fields():
             "warehouse_goods_receipts",
         )
     )
+    assert not {
+        "dispute_from_email",
+        "dispute_to_email",
+        "dispute_cc_email",
+        "dispute_subject",
+        "dispute_memo_body",
+        "email_dispatch_status",
+    }.intersection(SOURCE_COLUMNS["carrier_invoices"])
 
 
 def test_reconcile_supabase_data_uses_all_three_source_tables():
@@ -194,46 +222,39 @@ def test_update_invoice_audit_rejects_missing_invoice():
         raise AssertionError("A missing invoice should not report a successful write.")
 
 
-def test_queue_dispute_email_saves_reviewed_message_and_dispatch_trigger():
-    client = FakeUpdateClient([{"invoice_number": "INV-1"}])
+def test_queue_dispute_email_calls_atomic_supabase_dispatch_function():
+    client = FakeRpcClient("dispatch-123")
 
-    queue_dispute_email(
+    dispatch_id = queue_dispute_email(
         client,
         "INV-1",
-        from_email="sender@example.com",
+        "Northstar Freight",
         to_email="billing@example.com",
         cc_email="audit@example.com",
         subject="Billing dispute: INV-1",
         body="Please review the attached dispute memo.",
     )
 
-    table = client.table_instance
-    assert table.filters == [("invoice_number", "INV-1")]
-    assert table.in_filters == [
-        ("email_dispatch_status", ["NOT_QUEUED", "FAILED"])
-    ]
-    assert table.selected == "invoice_number"
-    assert table.values is not None
-    assert table.values["audit_status"] == "DISPUTED"
-    assert table.values["dispute_status"] == "PENDING_DISPATCH"
-    assert table.values["dispute_from_email"] == "sender@example.com"
-    assert table.values["dispute_to_email"] == "billing@example.com"
-    assert table.values["dispute_cc_email"] == "audit@example.com"
-    assert table.values["dispute_subject"] == "Billing dispute: INV-1"
-    assert table.values["dispute_memo_body"] == "Please review the attached dispute memo."
-    assert table.values["email_dispatch_status"] == "PENDING"
-    assert table.values["dispute_queued_at"]
-    assert table.values["audited_at"] == table.values["dispute_queued_at"]
+    assert dispatch_id == "dispatch-123"
+    assert client.function_name == "queue_dispute_dispatch"
+    assert client.params == {
+        "p_invoice_id": "INV-1",
+        "p_carrier_name": "Northstar Freight",
+        "p_dispute_to_email": "billing@example.com",
+        "p_dispute_cc_email": "audit@example.com",
+        "p_dispute_subject": "Billing dispute: INV-1",
+        "p_dispute_memo_body": "Please review the attached dispute memo.",
+    }
 
 
 def test_queue_dispute_email_validates_recipient_and_required_content():
-    client = FakeUpdateClient([{"invoice_number": "INV-1"}])
+    client = FakeRpcClient("dispatch-123")
 
     try:
         queue_dispute_email(
             client,
             "INV-1",
-            from_email="sender@example.com",
+            "Northstar Freight",
             to_email="",
             cc_email="",
             subject="Dispute",

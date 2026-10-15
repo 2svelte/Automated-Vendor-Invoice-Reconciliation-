@@ -31,16 +31,13 @@ SOURCE_COLUMNS = {
         "carrier_email",
     ],
     "carrier_invoices": [
-        "invoice_number", "po_number", "carrier_name", "billed_base_freight",
+        "invoice_id", "invoice_number", "po_number", "carrier_name", "billed_base_freight",
         "billed_fuel_surcharge", "billed_accessorial_fee", "billed_weight_lbs", "invoice_date",
         "bol_number", "pro_number", "billed_chargeable_weight", "accessorial_items",
         "invoice_total_due", "bill_to_name", "bill_to_address", "remit_to_name",
         "remit_to_address", "payment_terms", "payment_due_date", "pickup_date",
         "delivery_date", "freight_class", "nmfc_code", "rate_tariff_reference",
-        "rate_per_cwt", "handling_unit_count", "handling_unit_type",
-        "carrier_email", "dispute_status", "dispute_from_email", "dispute_to_email",
-        "dispute_cc_email", "dispute_subject",
-        "dispute_memo_body", "dispute_queued_at", "email_dispatch_status", "dispatched_at",
+        "rate_per_cwt", "handling_unit_count", "handling_unit_type", "carrier_email",
     ],
     "warehouse_goods_receipts": [
         "po_number", "delivery_timestamp", "dock_signature", "actual_scale_weight_lbs",
@@ -112,6 +109,29 @@ def reconcile_supabase_data(
     )
 
 
+def fetch_dispute_dispatches(client) -> list[dict[str, object]]:
+    """Fetch dispatch status and recipient metadata, newest dispatch first."""
+    rows: list[dict[str, object]] = []
+    offset = 0
+    page_size = 1000
+    while True:
+        response = (
+            client.table("dispute_dispatches")
+            .select(
+                "dispatch_id,invoice_id,dispute_to_email,email_dispatch_status,"
+                "queued_at,dispatched_at"
+            )
+            .order("queued_at", desc=True)
+            .range(offset, offset + page_size - 1)
+            .execute()
+        )
+        page = response.data or []
+        rows.extend(page)
+        if len(page) < page_size:
+            return rows
+        offset += page_size
+
+
 def update_invoice_audit(
     client,
     invoice_number: str,
@@ -157,18 +177,19 @@ def _validate_email_recipients(value: str, field_name: str, *, required: bool) -
 
 def queue_dispute_email(
     client,
-    invoice_number: str,
+    invoice_id: str,
+    carrier_name: str,
     *,
-    from_email: str,
     to_email: str,
     cc_email: str,
     subject: str,
     body: str,
-) -> None:
-    """Queue a reviewed dispute email for Power Automate and record the dispute."""
-    if not invoice_number.strip():
-        raise ValueError("invoice_number must not be empty")
-    from_email = _validate_email_recipients(from_email, "From", required=True)
+) -> str:
+    """Atomically queue a reviewed email and mark its invoice disputed."""
+    if not invoice_id.strip():
+        raise ValueError("invoice_id must not be empty")
+    if not carrier_name.strip():
+        raise ValueError("carrier_name must not be empty")
     to_email = _validate_email_recipients(to_email, "To", required=True)
     cc_email = _validate_email_recipients(cc_email, "CC", required=False)
     if not subject.strip():
@@ -176,33 +197,27 @@ def queue_dispute_email(
     if not body.strip():
         raise ValueError("Message body must not be empty.")
 
-    now = datetime.now(timezone.utc).isoformat()
-    response = (
-        client.table("carrier_invoices")
-        .update(
-            {
-                "audit_status": "DISPUTED",
-                "audit_note": "Dispute email queued for Outlook dispatch.",
-                "audited_at": now,
-                "dispute_status": "PENDING_DISPATCH",
-                "dispute_from_email": from_email,
-                "dispute_to_email": to_email,
-                "dispute_cc_email": cc_email,
-                "dispute_subject": subject.strip(),
-                "dispute_memo_body": body,
-                "dispute_queued_at": now,
-                "email_dispatch_status": "PENDING",
-            }
-        )
-        .eq("invoice_number", invoice_number)
-        .in_("email_dispatch_status", ["NOT_QUEUED", "FAILED"])
-        .select("invoice_number")
-        .execute()
-    )
-    if not response.data:
+    response = client.rpc(
+        "queue_dispute_dispatch",
+        {
+            "p_invoice_id": invoice_id,
+            "p_carrier_name": carrier_name.strip(),
+            "p_dispute_to_email": to_email,
+            "p_dispute_cc_email": cc_email,
+            "p_dispute_subject": subject.strip(),
+            "p_dispute_memo_body": body,
+        },
+    ).execute()
+    dispatch_id = response.data
+    if isinstance(dispatch_id, list) and dispatch_id:
+        dispatch_id = dispatch_id[0]
+    if isinstance(dispatch_id, dict):
+        dispatch_id = dispatch_id.get("dispatch_id")
+    if not isinstance(dispatch_id, str) or not dispatch_id.strip():
         raise LookupError(
-            f"Invoice {invoice_number} was not found, or its email is already pending/sent."
+            "Supabase did not return a dispatch ID. The dispatch was not confirmed."
         )
+    return dispatch_id
 
 
 def fetch_invoice_audit_events(client, invoice_number: str) -> list[dict[str, object]]:

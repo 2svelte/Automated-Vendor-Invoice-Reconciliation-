@@ -23,6 +23,7 @@ from src.reconciliation_engine import (
 )
 from src.supabase_data import (
     create_supabase_client,
+    fetch_dispute_dispatches,
     fetch_invoice_audit_events,
     queue_dispute_email,
     reconcile_supabase_data,
@@ -484,9 +485,29 @@ def render_audit() -> None:
             fuel_tolerance=fuel_tolerance,
             weight_tolerance_pct=weight_tolerance_pct,
         )
+        dispatches = pd.DataFrame(fetch_dispute_dispatches(client))
     except Exception as error:
-        st.error(f"Could not load and audit Supabase data: {error}")
+        st.error(
+            "Could not load and audit Supabase data, including the dispute "
+            f"dispatch queue: {error}"
+        )
         return
+
+    if not dispatches.empty:
+        latest_dispatches = (
+            dispatches.drop_duplicates("invoice_id", keep="first")
+            .drop(columns="queued_at")
+        )
+        audited = audited.merge(latest_dispatches, on="invoice_id", how="left")
+    else:
+        audited["dispatch_id"] = None
+        audited["dispute_to_email"] = None
+        audited["email_dispatch_status"] = None
+        audited["dispatched_at"] = None
+
+    success_message = st.session_state.pop("dispatch_success_message", None)
+    if isinstance(success_message, str) and success_message:
+        st.success(success_message)
 
     audited["reconciliation_status"] = audited["status"]
     if "audit_status" not in audited:
@@ -809,16 +830,26 @@ def render_audit() -> None:
                                     key=f"dispute_email_body_{selected_id}",
                                 )
                                 send_dispatch = st.form_submit_button(
-                                    "Send Dispatch", type="primary"
+                                    "Confirm & Send", type="primary"
                                 )
                                 discard_dispatch = st.form_submit_button("Discard")
 
                         if send_dispatch:
                             try:
-                                queue_dispute_email(
+                                invoice_id = selected.get("invoice_id")
+                                if not isinstance(invoice_id, str) or not invoice_id:
+                                    raise ValueError(
+                                        "The selected invoice has no Supabase invoice_id."
+                                    )
+                                carrier_name = selected.get("carrier_name")
+                                if not isinstance(carrier_name, str) or not carrier_name:
+                                    raise ValueError(
+                                        "The selected invoice has no carrier name."
+                                    )
+                                dispatch_id = queue_dispute_email(
                                     client,
-                                    selected_id,
-                                    from_email=OUTLOOK_FROM_EMAIL,
+                                    invoice_id,
+                                    carrier_name,
                                     to_email=to_email,
                                     cc_email=cc_email,
                                     subject=subject,
@@ -831,12 +862,12 @@ def render_audit() -> None:
                                 )
                             else:
                                 st.session_state[composer_key] = False
-                                st.session_state[dispatch_seen_key] = "PENDING"
-                                dispatch_status = "PENDING"
-                                st.success(
-                                    "Dispute dispatch queued. Power Automate will "
-                                    f"send it through Outlook to {to_email}."
+                                st.session_state["dispatch_success_message"] = (
+                                    "Dispute logged in dispatch queue "
+                                    f"(ID: {dispatch_id})! Power Automate is routing "
+                                    "the email through Outlook."
                                 )
+                                st.rerun()
                         elif discard_dispatch:
                             st.session_state[composer_key] = False
 

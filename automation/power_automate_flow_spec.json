@@ -31,26 +31,25 @@
     "send_ai_dispute": {"actions": ["request_dispute_draft", "send_for_procurement_review", "record_credit_memo_request"], "audit_required": true}
   },
   "outbound_dispute_dispatch": {
-    "source_table": "carrier_invoices",
+    "source_table": "dispute_dispatches",
     "trigger": "scheduled_poll_every_1_to_2_minutes",
     "poll_filter": "email_dispatch_status=eq.PENDING",
+    "poll_endpoint": "/rest/v1/dispute_dispatches?email_dispatch_status=eq.PENDING",
     "email_columns": {
-      "from": "dispute_from_email",
       "to": "dispute_to_email",
       "cc": "dispute_cc_email",
       "subject": "dispute_subject",
       "body": "dispute_memo_body"
     },
-    "sender": "nadiaravindra07@outlook.com",
+    "sender": "nadiaravindra07@outlook.com (configured directly in the Outlook action)",
+    "record_key": "dispatch_id",
     "outlook_action": "Send an email (V2)",
     "success_update": {
       "email_dispatch_status": "SENT",
-      "dispute_status": "DISPATCHED",
       "dispatched_at": "UTC timestamp"
     },
     "failure_update": {
-      "email_dispatch_status": "FAILED",
-      "dispute_status": "FAILED"
+      "email_dispatch_status": "FAILED"
     }
   }
 }
