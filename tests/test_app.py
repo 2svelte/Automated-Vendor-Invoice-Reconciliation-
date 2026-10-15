@@ -3,10 +3,25 @@ import pytest
 import pandas as pd
 
 from app import (
+    _default_carrier_email,
     _dispute_memo_button_label,
     _format_invoice_accuracy,
     _leakage_chart_html,
 )
+
+
+def test_default_carrier_email_prefers_saved_recipient_then_carrier_record() -> None:
+    invoice = pd.Series(
+        {
+            "carrier_name": "Northstar Freight",
+            "carrier_email": "carrier@example.com",
+            "dispute_to_email": "",
+        }
+    )
+    assert _default_carrier_email(invoice) == "carrier@example.com"
+
+    invoice["dispute_to_email"] = "saved@example.com"
+    assert _default_carrier_email(invoice) == "saved@example.com"
 
 
 def test_dispute_memo_button_label_tracks_current_session_generation() -> None:

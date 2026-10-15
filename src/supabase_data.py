@@ -28,6 +28,7 @@ SOURCE_COLUMNS = {
         "incoterms", "freight_charge_terms", "payment_terms",
         "equipment_type_required", "temperature_controlled", "liftgate_required",
         "scheduled_pickup_window", "scheduled_delivery_window", "buyer_contact_email",
+        "carrier_email",
     ],
     "carrier_invoices": [
         "invoice_number", "po_number", "carrier_name", "billed_base_freight",
@@ -37,6 +38,9 @@ SOURCE_COLUMNS = {
         "remit_to_address", "payment_terms", "payment_due_date", "pickup_date",
         "delivery_date", "freight_class", "nmfc_code", "rate_tariff_reference",
         "rate_per_cwt", "handling_unit_count", "handling_unit_type",
+        "carrier_email", "dispute_status", "dispute_from_email", "dispute_to_email",
+        "dispute_cc_email", "dispute_subject",
+        "dispute_memo_body", "dispute_queued_at", "email_dispatch_status", "dispatched_at",
     ],
     "warehouse_goods_receipts": [
         "po_number", "delivery_timestamp", "dock_signature", "actual_scale_weight_lbs",
@@ -47,7 +51,7 @@ SOURCE_COLUMNS = {
         "security_seal_number", "security_seal_status", "scale_operator_id",
         "scale_calibration_date", "yard_check_in_timestamp",
         "dock_unloaded_timestamp", "yard_departure_timestamp",
-        "received_pallet_count", "packaging_condition",
+        "received_pallet_count", "packaging_condition", "carrier_email",
     ],
 }
 
@@ -135,6 +139,70 @@ def update_invoice_audit(
     )
     if not response.data:
         raise LookupError(f"Invoice {invoice_number} was not found in Supabase.")
+
+
+def _validate_email_recipients(value: str, field_name: str, *, required: bool) -> str:
+    recipients = [address.strip() for address in value.split(",") if address.strip()]
+    if required and not recipients:
+        raise ValueError(f"{field_name} must include at least one email address.")
+    for address in recipients:
+        if (
+            address.count("@") != 1
+            or any(character.isspace() for character in address)
+            or "." not in address.rsplit("@", maxsplit=1)[1]
+        ):
+            raise ValueError(f"{field_name} contains an invalid email address: {address}")
+    return ", ".join(recipients)
+
+
+def queue_dispute_email(
+    client,
+    invoice_number: str,
+    *,
+    from_email: str,
+    to_email: str,
+    cc_email: str,
+    subject: str,
+    body: str,
+) -> None:
+    """Queue a reviewed dispute email for Power Automate and record the dispute."""
+    if not invoice_number.strip():
+        raise ValueError("invoice_number must not be empty")
+    from_email = _validate_email_recipients(from_email, "From", required=True)
+    to_email = _validate_email_recipients(to_email, "To", required=True)
+    cc_email = _validate_email_recipients(cc_email, "CC", required=False)
+    if not subject.strip():
+        raise ValueError("Subject must not be empty.")
+    if not body.strip():
+        raise ValueError("Message body must not be empty.")
+
+    now = datetime.now(timezone.utc).isoformat()
+    response = (
+        client.table("carrier_invoices")
+        .update(
+            {
+                "audit_status": "DISPUTED",
+                "audit_note": "Dispute email queued for Outlook dispatch.",
+                "audited_at": now,
+                "dispute_status": "PENDING_DISPATCH",
+                "dispute_from_email": from_email,
+                "dispute_to_email": to_email,
+                "dispute_cc_email": cc_email,
+                "dispute_subject": subject.strip(),
+                "dispute_memo_body": body,
+                "dispute_queued_at": now,
+                "email_dispatch_status": "PENDING",
+            }
+        )
+        .eq("invoice_number", invoice_number)
+        .in_("email_dispatch_status", ["NOT_QUEUED", "FAILED"])
+        .select("invoice_number")
+        .execute()
+    )
+    if not response.data:
+        raise LookupError(
+            f"Invoice {invoice_number} was not found, or its email is already pending/sent."
+        )
 
 
 def fetch_invoice_audit_events(client, invoice_number: str) -> list[dict[str, object]]:

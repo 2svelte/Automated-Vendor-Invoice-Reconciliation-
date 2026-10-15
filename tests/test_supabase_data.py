@@ -1,7 +1,12 @@
 from types import SimpleNamespace
 
 from src.reconciliation_engine import DISCREPANCY_FLAGGED
-from src.supabase_data import SOURCE_COLUMNS, reconcile_supabase_data, update_invoice_audit
+from src.supabase_data import (
+    SOURCE_COLUMNS,
+    queue_dispute_email,
+    reconcile_supabase_data,
+    update_invoice_audit,
+)
 
 
 class FakeReadTable:
@@ -34,6 +39,7 @@ class FakeUpdateTable:
         self.values = None
         self.filters = []
         self.selected = None
+        self.in_filters = []
 
     def update(self, values):
         self.values = values
@@ -41,6 +47,10 @@ class FakeUpdateTable:
 
     def eq(self, column, value):
         self.filters.append((column, value))
+        return self
+
+    def in_(self, column, values):
+        self.in_filters.append((column, values))
         return self
 
     def select(self, columns):
@@ -103,6 +113,14 @@ def test_source_columns_include_extended_document_fields():
         "received_pallet_count",
         "packaging_condition",
     }.issubset(SOURCE_COLUMNS["warehouse_goods_receipts"])
+    assert all(
+        "carrier_email" in SOURCE_COLUMNS[table]
+        for table in (
+            "carrier_invoices",
+            "purchase_orders",
+            "warehouse_goods_receipts",
+        )
+    )
 
 
 def test_reconcile_supabase_data_uses_all_three_source_tables():
@@ -174,3 +192,54 @@ def test_update_invoice_audit_rejects_missing_invoice():
         assert "INV-404" in str(error)
     else:
         raise AssertionError("A missing invoice should not report a successful write.")
+
+
+def test_queue_dispute_email_saves_reviewed_message_and_dispatch_trigger():
+    client = FakeUpdateClient([{"invoice_number": "INV-1"}])
+
+    queue_dispute_email(
+        client,
+        "INV-1",
+        from_email="sender@example.com",
+        to_email="billing@example.com",
+        cc_email="audit@example.com",
+        subject="Billing dispute: INV-1",
+        body="Please review the attached dispute memo.",
+    )
+
+    table = client.table_instance
+    assert table.filters == [("invoice_number", "INV-1")]
+    assert table.in_filters == [
+        ("email_dispatch_status", ["NOT_QUEUED", "FAILED"])
+    ]
+    assert table.selected == "invoice_number"
+    assert table.values is not None
+    assert table.values["audit_status"] == "DISPUTED"
+    assert table.values["dispute_status"] == "PENDING_DISPATCH"
+    assert table.values["dispute_from_email"] == "sender@example.com"
+    assert table.values["dispute_to_email"] == "billing@example.com"
+    assert table.values["dispute_cc_email"] == "audit@example.com"
+    assert table.values["dispute_subject"] == "Billing dispute: INV-1"
+    assert table.values["dispute_memo_body"] == "Please review the attached dispute memo."
+    assert table.values["email_dispatch_status"] == "PENDING"
+    assert table.values["dispute_queued_at"]
+    assert table.values["audited_at"] == table.values["dispute_queued_at"]
+
+
+def test_queue_dispute_email_validates_recipient_and_required_content():
+    client = FakeUpdateClient([{"invoice_number": "INV-1"}])
+
+    try:
+        queue_dispute_email(
+            client,
+            "INV-1",
+            from_email="sender@example.com",
+            to_email="",
+            cc_email="",
+            subject="Dispute",
+            body="Memo",
+        )
+    except ValueError as error:
+        assert "To must include" in str(error)
+    else:
+        raise AssertionError("A dispatch without a To recipient must be rejected.")

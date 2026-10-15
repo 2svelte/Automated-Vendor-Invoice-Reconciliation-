@@ -24,11 +24,13 @@ from src.reconciliation_engine import (
 from src.supabase_data import (
     create_supabase_client,
     fetch_invoice_audit_events,
+    queue_dispute_email,
     reconcile_supabase_data,
     update_invoice_audit,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parent
+OUTLOOK_FROM_EMAIL = "nadiaravindra07@outlook.com"
 HANDLED_STATUSES = {"OVERRIDE_APPROVED", "DISPUTED", "SCALE_TICKET_REQUESTED"}
 AUDIT_STATUS_LABELS = {
     "OVERRIDE_APPROVED": "Override approved",
@@ -74,6 +76,14 @@ def _format_invoice_accuracy(
 
 def _dispute_memo_button_label(has_generated: bool) -> str:
     return "Regenerate dispute memo" if has_generated else "Generate dispute memo"
+
+
+def _default_carrier_email(selected: pd.Series) -> str:
+    saved_email = selected.get("dispute_to_email")
+    if isinstance(saved_email, str) and saved_email.strip():
+        return saved_email.strip()
+    carrier_email = selected.get("carrier_email")
+    return carrier_email.strip() if isinstance(carrier_email, str) else ""
 
 
 def _leakage_chart_html(leakage_summary: pd.DataFrame) -> str:
@@ -694,6 +704,7 @@ def render_audit() -> None:
                 ):
                     st.session_state[generated_key] = True
                     st.session_state.pop(memo_key, None)
+                    st.session_state.pop(f"dispute_email_body_{selected_id}", None)
                     st.session_state[unavailable_key] = False
                     with st.spinner("Drafting dispute memo..."):
                         try:
@@ -714,13 +725,130 @@ def render_audit() -> None:
                         "Generated draft. Review it for accuracy before sending."
                     )
                     st.code(memo, language="text")
-                    st.download_button(
-                        "Download dispute memo",
-                        data=memo,
-                        file_name=f"{selected_id}_dispute.txt",
-                        mime="text/plain",
-                        key=f"download_memo_{selected_id}",
-                    )
+                    dispatch_status = selected.get("email_dispatch_status")
+                    if not isinstance(dispatch_status, str) or not dispatch_status:
+                        dispatch_status = "NOT_QUEUED"
+                    dispatch_seen_key = f"dispute_dispatch_seen_{selected_id}"
+                    previous_dispatch_status = st.session_state.get(dispatch_seen_key)
+                    if (
+                        previous_dispatch_status == "PENDING"
+                        and dispatch_status == "SENT"
+                    ):
+                        st.toast(
+                            f"Outlook sent the dispute email to "
+                            f"{selected.get('dispute_to_email', '')}."
+                        )
+                    st.session_state[dispatch_seen_key] = dispatch_status
+
+                    memo_actions = st.columns(2)
+                    with memo_actions[0]:
+                        if st.button(
+                            "Send As Email",
+                            key=f"open_dispute_email_{selected_id}",
+                            disabled=dispatch_status in {"PENDING", "SENT"},
+                        ):
+                            st.session_state[
+                                f"show_dispute_email_{selected_id}"
+                            ] = True
+                    with memo_actions[1]:
+                        st.download_button(
+                            "Download dispute memo",
+                            data=memo,
+                            file_name=f"{selected_id}_dispute.txt",
+                            mime="text/plain",
+                            key=f"download_memo_{selected_id}",
+                        )
+
+                    composer_key = f"show_dispute_email_{selected_id}"
+                    if st.session_state.get(composer_key, False):
+                        with st.container(border=True):
+                            st.markdown("#### Outlook dispute email")
+                            st.caption(
+                                "Power Automate must be authorized to send from this "
+                                "Outlook address."
+                            )
+                            with st.form(f"dispute_email_form_{selected_id}"):
+                                st.text_input(
+                                    "From (Outlook account)",
+                                    value=OUTLOOK_FROM_EMAIL,
+                                    disabled=True,
+                                    key=f"dispute_email_from_{selected_id}",
+                                )
+                                to_email = st.text_input(
+                                    "To",
+                                    value=_default_carrier_email(selected),
+                                    key=f"dispute_email_to_{selected_id}",
+                                    help=(
+                                        "Enter one or more comma-separated carrier "
+                                        "email addresses."
+                                    ),
+                                )
+                                cc_email = st.text_input(
+                                    "CC",
+                                    value=(
+                                        selected.get("dispute_cc_email")
+                                        if isinstance(
+                                            selected.get("dispute_cc_email"), str
+                                        )
+                                        else ""
+                                    ),
+                                    key=f"dispute_email_cc_{selected_id}",
+                                )
+                                subject = st.text_input(
+                                    "Subject",
+                                    value=(
+                                        f"Billing Dispute: {selected_id} / "
+                                        f"PO-{selected.get('po_number', '')}"
+                                    ),
+                                    key=f"dispute_email_subject_{selected_id}",
+                                )
+                                body = st.text_area(
+                                    "Message",
+                                    value=memo,
+                                    height=260,
+                                    key=f"dispute_email_body_{selected_id}",
+                                )
+                                send_dispatch = st.form_submit_button(
+                                    "Send Dispatch", type="primary"
+                                )
+                                discard_dispatch = st.form_submit_button("Discard")
+
+                        if send_dispatch:
+                            try:
+                                queue_dispute_email(
+                                    client,
+                                    selected_id,
+                                    from_email=OUTLOOK_FROM_EMAIL,
+                                    to_email=to_email,
+                                    cc_email=cc_email,
+                                    subject=subject,
+                                    body=body or "",
+                                )
+                            except Exception as error:
+                                st.error(
+                                    f"Could not queue the dispute email for "
+                                    f"{selected_id}: {error}"
+                                )
+                            else:
+                                st.session_state[composer_key] = False
+                                st.session_state[dispatch_seen_key] = "PENDING"
+                                dispatch_status = "PENDING"
+                                st.success(
+                                    "Dispute dispatch queued. Power Automate will "
+                                    f"send it through Outlook to {to_email}."
+                                )
+                        elif discard_dispatch:
+                            st.session_state[composer_key] = False
+
+                    if dispatch_status == "PENDING":
+                        st.info("Dispute email is pending Outlook dispatch.")
+                    elif dispatch_status == "SENT":
+                        st.success("Dispute email sent through Outlook.")
+                    elif dispatch_status == "FAILED":
+                        st.error(
+                            "Outlook could not send this dispute email. Correct the "
+                            "details and queue it again."
+                        )
                 else:
                     st.caption("Generate a draft when you're ready to review it.")
 

@@ -1,6 +1,6 @@
 # Power Automate Handshake Runbook
 
-This project uses two file-based handshakes. Power Automate owns mailbox/folder monitoring and operational notifications; Python owns deterministic reconciliation and queue formatting.
+Power Automate owns mailbox/folder monitoring, Outlook delivery, and operational notifications; Python owns deterministic reconciliation and queue formatting.
 
 ## Prerequisites
 
@@ -54,6 +54,29 @@ The invoice CSV must contain the columns documented in `README.md`. Do not let t
    - `approve_overcharge`: record manager approval and release the invoice to AP.
    - `send_ai_dispute`: call the dispute-drafting endpoint or operator workflow, then send the reviewed dispute email and record the credit memo request.
 9. Write the action, actor, timestamp, and invoice/PO identifiers to the system of record.
+
+### Outlook dispute dispatch from the Streamlit composer
+
+1. Apply all Supabase migrations, including `20261015120000_outlook_dispute_dispatch.sql`.
+2. In the Streamlit workbench, generate and review a dispute memo, choose **Send As Email**, and submit the in-app compose form. The app updates the matching `carrier_invoices` row with:
+   - `audit_status = DISPUTED`
+   - `dispute_status = PENDING_DISPATCH`
+   - `dispute_from_email`, `dispute_to_email`, `dispute_cc_email`, `dispute_subject`, and `dispute_memo_body`
+   - `dispute_queued_at` and `email_dispatch_status = PENDING`
+3. Configure a scheduled cloud flow to run every 1–2 minutes and retrieve pending messages:
+   `GET https://<project-ref>.supabase.co/rest/v1/carrier_invoices?email_dispatch_status=eq.PENDING`
+   Include the Supabase API key and an appropriately scoped authorization token in Power Automate's secure connection/configuration; do not put credentials in the Streamlit app or repository.
+4. In **Apply to each**, add the Microsoft 365 Outlook **Send an email (V2)** action. Map `dispute_from_email` to From (Send as), `dispute_to_email` to To, `dispute_cc_email` to CC, `dispute_subject` to Subject, and `dispute_memo_body` to Body. The Outlook connection must have permission to send as `nadiaravindra07@outlook.com`.
+5. After successful delivery, PATCH the same row using its `invoice_number`:
+   `{"email_dispatch_status":"SENT","dispute_status":"DISPATCHED","dispatched_at":"<UTC timestamp>"}`
+   On a terminal send error, set `email_dispatch_status` and `dispute_status` to `FAILED` so the reviewer can correct details and queue a retry.
+6. The Streamlit workbench polls Supabase every 15 seconds, prevents another queue while status is `PENDING` or `SENT`, and confirms delivery when the flow reports `SENT`.
+
+Configure retries and concurrency control in the flow so one pending row is not sent more than once. Restrict Supabase credentials to the minimum required operations and protect the flow's HTTP actions.
+
+The project demo defaults the `carrier_email` column on invoices, purchase orders, and receipts to `nadiaravindra07@gmail.com`. This is a test destination, not a real carrier contact; update these rows to verified carrier addresses before production use. Outlook-to-Gmail delivery is usually supported, subject to the Microsoft 365 tenant's external-recipient policy.
+
+The Streamlit app currently queues messages in Supabase and does not POST to a Power Automate HTTP-trigger URL. Use scheduled polling unless an HTTP invocation is added separately.
 
 ### Option B: Power Automate cloud flow
 
