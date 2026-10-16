@@ -819,47 +819,7 @@ def render_audit() -> None:
                             audit_note,
                         )
 
-            if selected["audit_status"] in {"DISPUTED", "REBUTTAL_RECEIVED"}:
-                st.markdown("#### Dispute lifecycle")
-                lifecycle_note = st.text_area(
-                    "Carrier response / resolution note",
-                    key=f"lifecycle_note_{selected_id}",
-                    placeholder="Summarize the carrier's response or credit memo.",
-                )
-                if selected["audit_status"] == "DISPUTED":
-                    lifecycle_actions = (
-                        ("Record Carrier Rebuttal", "REBUTTAL_RECEIVED"),
-                        ("Close — Credit Memo Issued", "CLOSED_RESOLVED"),
-                        ("Close — Dispute Conceded", "CLOSED_OVERRIDDEN"),
-                    )
-                else:
-                    lifecycle_actions = (
-                        ("Close — Credit Memo Issued", "CLOSED_RESOLVED"),
-                        ("Close — Dispute Conceded", "CLOSED_OVERRIDDEN"),
-                    )
-                for column, (label, audit_status) in zip(
-                    st.columns(len(lifecycle_actions)),
-                    lifecycle_actions,
-                    strict=True,
-                ):
-                    if column.button(
-                        label,
-                        key=f"lifecycle_{audit_status}_{selected_id}",
-                        use_container_width=True,
-                    ):
-                        _save_resolution(
-                            client,
-                            selected_id,
-                            selected_number,
-                            audit_status,
-                            lifecycle_note,
-                        )
-
-            if selected["reconciliation_status"] in {
-                DISCREPANCY_FLAGGED,
-                REVIEW_INCOMPLETE,
-                "DUPLICATE_BILLING_BLOCKED",
-            } or (
+            if not showing_history or (
                 selected["audit_status"]
                 in {
                     "DISPUTED",
@@ -1064,6 +1024,42 @@ def render_audit() -> None:
                         )
                 else:
                     st.caption("Generate a draft when you're ready to review it.")
+
+            if selected["audit_status"] in {"DISPUTED", "REBUTTAL_RECEIVED"}:
+                st.markdown("#### Dispute lifecycle")
+                lifecycle_note = st.text_area(
+                    "Carrier response / resolution note",
+                    key=f"lifecycle_note_{selected_id}",
+                    placeholder="Summarize the carrier's response or credit memo.",
+                )
+                if selected["audit_status"] == "DISPUTED":
+                    lifecycle_actions = (
+                        ("Record Carrier Rebuttal", "REBUTTAL_RECEIVED"),
+                        ("Close — Credit Memo Issued", "CLOSED_RESOLVED"),
+                        ("Close — Dispute Conceded", "CLOSED_OVERRIDDEN"),
+                    )
+                else:
+                    lifecycle_actions = (
+                        ("Close — Credit Memo Issued", "CLOSED_RESOLVED"),
+                        ("Close — Dispute Conceded", "CLOSED_OVERRIDDEN"),
+                    )
+                for column, (label, audit_status) in zip(
+                    st.columns(len(lifecycle_actions)),
+                    lifecycle_actions,
+                    strict=True,
+                ):
+                    if column.button(
+                        label,
+                        key=f"lifecycle_{audit_status}_{selected_id}",
+                        use_container_width=True,
+                    ):
+                        _save_resolution(
+                            client,
+                            selected_id,
+                            selected_number,
+                            audit_status,
+                            lifecycle_note,
+                        )
 
             try:
                 events = fetch_invoice_audit_events(client, selected_id)
