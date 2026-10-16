@@ -32,12 +32,14 @@
   },
   "outbound_dispute_dispatch": {
     "source_table": "dispute_dispatches",
-    "trigger": "scheduled_poll_every_1_to_2_minutes",
-    "poll_filter": "email_dispatch_status=eq.PENDING",
-    "poll_endpoint": "/rest/v1/dispute_dispatches?email_dispatch_status=eq.PENDING",
+    "trigger": "Power Automate Desktop scheduled polling",
+    "poll_interval_seconds": 60,
+    "poll_filter": "email_dispatch_status eq PENDING",
+    "poll_endpoint": "/rest/v1/dispute_dispatches?email_dispatch_status=eq.PENDING&order=queued_at.asc",
     "email_columns": {
       "to": "dispute_to_email",
       "cc": "dispute_cc_email",
+      "from": "dispute_from_email",
       "subject": "dispute_subject",
       "body": "dispute_memo_body",
       "attachment_content_base64": "dispute_evidence_pdf_base64",
@@ -46,13 +48,16 @@
     "sender": "nadiaravindra07@outlook.com (configured directly in the Outlook action)",
     "record_key": "dispatch_id",
     "outlook_action": "Send an email (V2)",
+    "dispatch_record_lookup": "Poll pending dispatches and process each row by dispatch_id.",
     "attachment_action": "When dispute_evidence_pdf_base64 is not empty, attach base64ToBinary(dispute_evidence_pdf_base64) using dispute_evidence_filename.",
     "success_update": {
       "email_dispatch_status": "SENT",
-      "dispatched_at": "UTC timestamp"
+      "dispatched_at": "UTC timestamp",
+      "error_message": null
     },
     "failure_update": {
-      "email_dispatch_status": "FAILED"
+      "email_dispatch_status": "FAILED",
+      "error_message": "Power Automate Outlook send failure details"
     },
     "confirmed_dispute_lifecycle": {
       "trigger": "Database trigger after email_dispatch_status changes to SENT",
@@ -60,6 +65,7 @@
       "dispute_date": "dispatched_at",
       "rebuttal_deadline": "dispatched_at + 30 days",
       "resolution_states": ["DISPUTED", "REBUTTAL_RECEIVED", "CLOSED_RESOLVED", "CLOSED_OVERRIDDEN"]
-    }
+    },
+    "streamlit_queue_behavior": "Insert PENDING dispatch and atomically set invoice audit_status to DISPUTED; close composer and rerun without making an HTTP request."
   }
 }

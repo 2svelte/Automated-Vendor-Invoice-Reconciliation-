@@ -57,26 +57,24 @@ The invoice CSV must contain the columns documented in `README.md`. Do not let t
 
 ### Outlook dispute dispatch from the Streamlit composer
 
-1. Apply all Supabase migrations, including `20261016120000_dispute_evidence_lifecycle_and_duplicate_billing.sql`.
-2. In the Streamlit workbench, generate and review the short-pay memo and one-page evidence voucher, choose **Send As Email**, and submit **Confirm & Send**. In one database transaction, the app inserts a row in `dispute_dispatches` with the invoice ID, carrier, recipients, subject, memo, optional base64 PDF and filename, and `email_dispatch_status = PENDING`. The invoice does not enter `DISPUTED` until delivery is confirmed.
-3. Configure a scheduled cloud flow to run every 1–2 minutes and retrieve pending messages:
-   `GET https://<project-ref>.supabase.co/rest/v1/dispute_dispatches?email_dispatch_status=eq.PENDING`
-   Include the Supabase API key and an appropriately scoped authorization token in Power Automate's secure connection/configuration; do not put credentials in the Streamlit app or repository.
-4. In **Apply to each**, add the Microsoft 365 Outlook **Send an email (V2)** action. Map `dispute_to_email` to To, `dispute_cc_email` to CC, `dispute_subject` to Subject, and `dispute_memo_body` to Body. When `dispute_evidence_pdf_base64` is not empty, map `dispute_evidence_filename` to the attachment name and `base64ToBinary(dispute_evidence_pdf_base64)` to attachment content. Set From (Send as) to `nadiaravindra07@outlook.com`; the Outlook connection must have permission to send as that address.
-5. After successful delivery, PATCH the same row using its `dispatch_id`:
-   `PATCH https://<project-ref>.supabase.co/rest/v1/dispute_dispatches?dispatch_id=eq.<dispatch_id>`
-   `{"email_dispatch_status":"SENT","dispatched_at":"<UTC timestamp>"}`
-   This confirmation starts the 30-day rebuttal window; the database sets the invoice to `DISPUTED`, records `dispute_date`, and calculates `rebuttal_deadline`.
-   On a terminal send error, PATCH the same endpoint with `{"email_dispatch_status":"FAILED"}` so the reviewer can correct details and queue a retry.
-6. The Streamlit workbench polls Supabase every 15 seconds, prevents another queue while status is `PENDING` or `SENT`, and confirms delivery when the flow reports `SENT`. Reviewers can advance the invoice through `REBUTTAL_RECEIVED`, `CLOSED_RESOLVED` (credit memo issued), and `CLOSED_OVERRIDDEN` (dispute conceded); the workbench displays the SLA countdown.
+1. Apply all Supabase migrations, including `20261016120000_dispute_evidence_lifecycle_and_duplicate_billing.sql` and `20261016130000_dispute_dispatch_metadata.sql`.
+2. In the Streamlit workbench, generate and review the short-pay memo and evidence voucher, choose **Send As Email**, and submit **Confirm & Send**. A Supabase RPC atomically inserts the dispatch row as `PENDING` and marks the invoice `DISPUTED`, recording the sender/recipients, subject/body, optional base64 PDF, and UTC queue timestamp. Streamlit closes the compose card, displays the queued confirmation, and reruns; it does not make an HTTP request.
+3. Configure Power Automate Desktop to poll Supabase on a schedule (for example, every minute) for unprocessed rows:
+
+   ```text
+   GET https://<project-ref>.supabase.co/rest/v1/dispute_dispatches?email_dispatch_status=eq.PENDING&order=queued_at.asc
+   ```
+
+   Use secured PAD credentials for the Supabase API key and authorization token. Do not put database credentials in the repository. Process each pending row by `dispatch_id`, and configure concurrency/locking so a row cannot be sent twice.
+4. In PAD, map `dispute_to_email` to To, `dispute_cc_email` to CC, `dispute_subject` to Subject, and `dispute_memo_body` to Body in the Microsoft 365 Outlook **Send an email (V2)** action. Configure Outlook's From (Send as) address as `dispute_from_email` (normally `nadiaravindra07@outlook.com`); its connection must have permission to send as that address. When `dispute_evidence_pdf_base64` is present, decode it to a file and attach it using `dispute_evidence_filename`.
+5. After successful Outlook delivery, PATCH the row selected by `dispatch_id` to `{"email_dispatch_status":"SENT","dispatched_at":"<UTC timestamp>","error_message":null}`. The database records the dispute date and calculates the 30-day rebuttal deadline. If Outlook delivery fails, PATCH `email_dispatch_status` to `FAILED` and include the error in `error_message`.
+6. The Streamlit workbench refreshes from Supabase every 15 seconds and prevents another queue while a dispatch is `PENDING` or `SENT`. Reviewers can advance the invoice through `REBUTTAL_RECEIVED`, `CLOSED_RESOLVED` (credit memo issued), and `CLOSED_OVERRIDDEN` (dispute conceded); the workbench displays the SLA countdown.
 
 Duplicate invoices are detected by identical invoice number or by carrier + BOL + PO. `DUPLICATE_BILLING_BLOCKED` records show the original invoice ID and must not be routed to `approve_overcharge`.
 
-Configure retries and concurrency control in the flow so one pending row is not sent more than once. Restrict Supabase credentials to the minimum required operations and protect the flow's HTTP actions.
+Configure retries and concurrency control in PAD so one pending row is not sent more than once. Restrict Supabase credentials to the minimum required operations.
 
 The project demo defaults the `carrier_email` column on invoices, purchase orders, and receipts to `nadiaravindra07@gmail.com`. This is a test destination, not a real carrier contact; update these rows to verified carrier addresses before production use. Outlook-to-Gmail delivery is usually supported, subject to the Microsoft 365 tenant's external-recipient policy.
-
-The Streamlit app currently queues messages in Supabase and does not POST to a Power Automate HTTP-trigger URL. Use scheduled polling unless an HTTP invocation is added separately.
 
 ### Option B: Power Automate cloud flow
 

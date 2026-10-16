@@ -559,6 +559,7 @@ def render_audit() -> None:
         audited["dispute_to_email"] = None
         audited["email_dispatch_status"] = None
         audited["dispatched_at"] = None
+        audited["error_message"] = None
 
     success_message = st.session_state.pop("dispatch_success_message", None)
     if isinstance(success_message, str) and success_message:
@@ -978,12 +979,13 @@ def render_audit() -> None:
                                     raise ValueError(
                                         "The selected invoice has no carrier name."
                                     )
-                                dispatch_id = queue_dispute_email(
+                                queue_dispute_email(
                                     client,
                                     invoice_id,
                                     carrier_name,
                                     to_email=to_email,
                                     cc_email=cc_email,
+                                    from_email=OUTLOOK_FROM_EMAIL,
                                     subject=subject,
                                     body=body or "",
                                     evidence_packet=(
@@ -1005,9 +1007,8 @@ def render_audit() -> None:
                             else:
                                 st.session_state[composer_key] = False
                                 st.session_state["dispatch_success_message"] = (
-                                    "Dispute logged in dispatch queue "
-                                    f"(ID: {dispatch_id})! Power Automate is routing "
-                                    "the email through Outlook."
+                                    "🚀 Dispute logged! Outbound dispatch queued for "
+                                    "Power Automate Desktop to process via Outlook."
                                 )
                                 st.rerun()
                         elif discard_dispatch:
@@ -1018,9 +1019,15 @@ def render_audit() -> None:
                     elif dispatch_status == "SENT":
                         st.success("Dispute email sent through Outlook.")
                     elif dispatch_status == "FAILED":
+                        dispatch_error = selected.get("error_message")
+                        error_detail = (
+                            f" Details: {dispatch_error}"
+                            if isinstance(dispatch_error, str) and dispatch_error
+                            else ""
+                        )
                         st.error(
-                            "Outlook could not send this dispute email. Correct the "
-                            "details and queue it again."
+                            "Power Automate Desktop could not send this dispute email."
+                            f"{error_detail}"
                         )
                 else:
                     st.caption("Generate a draft when you're ready to review it.")

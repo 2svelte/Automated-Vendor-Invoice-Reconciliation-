@@ -267,7 +267,25 @@ def test_queue_dispute_email_calls_atomic_supabase_dispatch_function():
         "p_dispute_memo_body": "Please review the attached dispute memo.",
         "p_dispute_evidence_pdf_base64": None,
         "p_dispute_evidence_filename": None,
+        "p_dispute_from_email": "",
     }
+
+
+def test_queue_dispute_email_includes_configured_sender():
+    client = FakeRpcClient("dispatch-123")
+
+    queue_dispute_email(
+        client,
+        "INV-1",
+        "Northstar Freight",
+        to_email="billing@example.com",
+        cc_email="",
+        from_email="audit@example.com",
+        subject="Billing dispute: INV-1",
+        body="Please review the dispute memo.",
+    )
+
+    assert client.params["p_dispute_from_email"] == "audit@example.com"
 
 
 def test_queue_dispute_email_encodes_verified_pdf_attachment():

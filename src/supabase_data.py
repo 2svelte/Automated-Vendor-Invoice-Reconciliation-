@@ -124,7 +124,7 @@ def fetch_dispute_dispatches(client) -> list[dict[str, object]]:
             client.table("dispute_dispatches")
             .select(
                 "dispatch_id,invoice_id,dispute_to_email,email_dispatch_status,"
-                "queued_at,dispatched_at"
+                "queued_at,dispatched_at,error_message"
             )
             .order("queued_at", desc=True)
             .range(offset, offset + page_size - 1)
@@ -187,12 +187,13 @@ def queue_dispute_email(
     *,
     to_email: str,
     cc_email: str,
+    from_email: str = "",
     subject: str,
     body: str,
     evidence_packet: bytes | None = None,
     evidence_filename: str | None = None,
 ) -> str:
-    """Atomically queue a reviewed email; delivery confirmation starts the dispute."""
+    """Atomically queue a reviewed email and mark the invoice disputed."""
     if not invoice_id.strip():
         raise ValueError("invoice_id must not be empty")
     if not carrier_name.strip():
@@ -228,6 +229,7 @@ def queue_dispute_email(
             "p_dispute_memo_body": body,
             "p_dispute_evidence_pdf_base64": evidence_packet_base64,
             "p_dispute_evidence_filename": evidence_filename,
+            "p_dispute_from_email": from_email.strip(),
         },
     ).execute()
     dispatch_id = response.data
