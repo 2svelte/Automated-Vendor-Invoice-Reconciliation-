@@ -29,8 +29,8 @@ def test_default_carrier_email_prefers_saved_recipient_then_carrier_record() -> 
 
 
 def test_dispute_memo_button_label_tracks_current_session_generation() -> None:
-    assert _dispute_memo_button_label(False) == "Generate dispute memo"
-    assert _dispute_memo_button_label(True) == "Regenerate dispute memo"
+    assert _dispute_memo_button_label(False) == "Generate Dispute Memo"
+    assert _dispute_memo_button_label(True) == "Regenerate Dispute Memo"
 
 
 def test_rebuttal_sla_and_evidence_filename_formatting() -> None:

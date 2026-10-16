@@ -88,7 +88,7 @@ def _format_invoice_accuracy(
 
 
 def _dispute_memo_button_label(has_generated: bool) -> str:
-    return "Regenerate dispute memo" if has_generated else "Generate dispute memo"
+    return "Regenerate Dispute Memo" if has_generated else "Generate Dispute Memo"
 
 
 def _rebuttal_sla(deadline: object, audit_status: object = "") -> str:
@@ -855,7 +855,11 @@ def render_audit() -> None:
                             lifecycle_note,
                         )
 
-            if selected["reconciliation_status"] == DISCREPANCY_FLAGGED or (
+            if selected["reconciliation_status"] in {
+                DISCREPANCY_FLAGGED,
+                REVIEW_INCOMPLETE,
+                "DUPLICATE_BILLING_BLOCKED",
+            } or (
                 selected["audit_status"]
                 in {
                     "DISPUTED",
