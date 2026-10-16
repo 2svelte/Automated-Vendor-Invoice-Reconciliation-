@@ -17,7 +17,7 @@
     {"name": "write_audit_log", "target": "data/reconciled_audit_log.csv"}
   ],
   "exception_route": {
-    "condition": "status == 'DISCREPANCY_FLAGGED' or status == 'REVIEW_INCOMPLETE' or variance_pct > 0.05",
+    "condition": "status == 'DISCREPANCY_FLAGGED' or status == 'REVIEW_INCOMPLETE' or status == 'DUPLICATE_BILLING_BLOCKED' or variance_pct > 0.05",
     "queue_path": "automation/discrepancy_queue.json",
     "queue_format": "JSON array of exception objects",
     "local_desktop_trigger": "Wait for file creation",
@@ -27,7 +27,7 @@
     "recipient": "Logistics Manager"
   },
   "approval_branches": {
-    "approve_overcharge": {"actions": ["record_manager_approval", "release_invoice_to_ap"], "audit_required": true},
+    "approve_overcharge": {"actions": ["record_manager_approval", "release_invoice_to_ap"], "audit_required": true, "blocked_when": "status == 'DUPLICATE_BILLING_BLOCKED'"},
     "send_ai_dispute": {"actions": ["request_dispute_draft", "send_for_procurement_review", "record_credit_memo_request"], "audit_required": true}
   },
   "outbound_dispute_dispatch": {
@@ -39,17 +39,27 @@
       "to": "dispute_to_email",
       "cc": "dispute_cc_email",
       "subject": "dispute_subject",
-      "body": "dispute_memo_body"
+      "body": "dispute_memo_body",
+      "attachment_content_base64": "dispute_evidence_pdf_base64",
+      "attachment_filename": "dispute_evidence_filename"
     },
     "sender": "nadiaravindra07@outlook.com (configured directly in the Outlook action)",
     "record_key": "dispatch_id",
     "outlook_action": "Send an email (V2)",
+    "attachment_action": "When dispute_evidence_pdf_base64 is not empty, attach base64ToBinary(dispute_evidence_pdf_base64) using dispute_evidence_filename.",
     "success_update": {
       "email_dispatch_status": "SENT",
       "dispatched_at": "UTC timestamp"
     },
     "failure_update": {
       "email_dispatch_status": "FAILED"
+    },
+    "confirmed_dispute_lifecycle": {
+      "trigger": "Database trigger after email_dispatch_status changes to SENT",
+      "invoice_status": "DISPUTED",
+      "dispute_date": "dispatched_at",
+      "rebuttal_deadline": "dispatched_at + 30 days",
+      "resolution_states": ["DISPUTED", "REBUTTAL_RECEIVED", "CLOSED_RESOLVED", "CLOSED_OVERRIDDEN"]
     }
   }
 }

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,8 +14,10 @@ from src.reconciliation_engine import reconcile
 AUDIT_STATUSES = {
     "UNDER_REVIEW",
     "OVERRIDE_APPROVED",
-    "DISPUTED",
     "SCALE_TICKET_REQUESTED",
+    "REBUTTAL_RECEIVED",
+    "CLOSED_RESOLVED",
+    "CLOSED_OVERRIDDEN",
 }
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -38,6 +41,8 @@ SOURCE_COLUMNS = {
         "remit_to_address", "payment_terms", "payment_due_date", "pickup_date",
         "delivery_date", "freight_class", "nmfc_code", "rate_tariff_reference",
         "rate_per_cwt", "handling_unit_count", "handling_unit_type", "carrier_email",
+        "audit_status", "audit_note", "audited_at", "dispute_date",
+        "rebuttal_deadline", "created_at", "source_document_hash",
     ],
     "warehouse_goods_receipts": [
         "po_number", "delivery_timestamp", "dock_signature", "actual_scale_weight_lbs",
@@ -134,15 +139,15 @@ def fetch_dispute_dispatches(client) -> list[dict[str, object]]:
 
 def update_invoice_audit(
     client,
-    invoice_number: str,
+    invoice_id: str,
     audit_status: str,
     audit_note: str,
 ) -> None:
     """Write a resolution to Supabase; a database trigger records the audit event."""
     if audit_status not in AUDIT_STATUSES:
         raise ValueError(f"Unsupported audit status: {audit_status}")
-    if not invoice_number.strip():
-        raise ValueError("invoice_number must not be empty")
+    if not invoice_id.strip():
+        raise ValueError("invoice_id must not be empty")
 
     response = (
         client.table("carrier_invoices")
@@ -153,12 +158,12 @@ def update_invoice_audit(
                 "audited_at": datetime.now(timezone.utc).isoformat(),
             }
         )
-        .eq("invoice_number", invoice_number)
-        .select("invoice_number")
+        .eq("invoice_id", invoice_id)
+        .select("invoice_id")
         .execute()
     )
     if not response.data:
-        raise LookupError(f"Invoice {invoice_number} was not found in Supabase.")
+        raise LookupError(f"Invoice {invoice_id} was not found in Supabase.")
 
 
 def _validate_email_recipients(value: str, field_name: str, *, required: bool) -> str:
@@ -184,8 +189,10 @@ def queue_dispute_email(
     cc_email: str,
     subject: str,
     body: str,
+    evidence_packet: bytes | None = None,
+    evidence_filename: str | None = None,
 ) -> str:
-    """Atomically queue a reviewed email and mark its invoice disputed."""
+    """Atomically queue a reviewed email; delivery confirmation starts the dispute."""
     if not invoice_id.strip():
         raise ValueError("invoice_id must not be empty")
     if not carrier_name.strip():
@@ -196,6 +203,19 @@ def queue_dispute_email(
         raise ValueError("Subject must not be empty.")
     if not body.strip():
         raise ValueError("Message body must not be empty.")
+    evidence_packet_base64 = None
+    if evidence_packet is not None:
+        if not evidence_packet.startswith(b"%PDF-"):
+            raise ValueError("The dispute evidence attachment is not a valid PDF.")
+        if (
+            not evidence_filename
+            or Path(evidence_filename).name != evidence_filename
+            or not evidence_filename.lower().endswith(".pdf")
+        ):
+            raise ValueError("The dispute evidence attachment needs a valid PDF filename.")
+        evidence_packet_base64 = base64.b64encode(evidence_packet).decode("ascii")
+    elif evidence_filename:
+        raise ValueError("An evidence filename cannot be set without a PDF attachment.")
 
     response = client.rpc(
         "queue_dispute_dispatch",
@@ -206,6 +226,8 @@ def queue_dispute_email(
             "p_dispute_cc_email": cc_email,
             "p_dispute_subject": subject.strip(),
             "p_dispute_memo_body": body,
+            "p_dispute_evidence_pdf_base64": evidence_packet_base64,
+            "p_dispute_evidence_filename": evidence_filename,
         },
     ).execute()
     dispatch_id = response.data
@@ -220,12 +242,12 @@ def queue_dispute_email(
     return dispatch_id
 
 
-def fetch_invoice_audit_events(client, invoice_number: str) -> list[dict[str, object]]:
+def fetch_invoice_audit_events(client, invoice_id: str) -> list[dict[str, object]]:
     """Return newest-first, immutable audit events for one invoice."""
     response = (
         client.table("invoice_audit_events")
         .select("*")
-        .eq("invoice_number", invoice_number)
+        .eq("invoice_id", invoice_id)
         .order("created_at", desc=True)
         .execute()
     )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from datetime import datetime, timezone
 from html import escape
 from pathlib import Path
 from numbers import Real
@@ -12,6 +13,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from src.agent import draft_dispute
+from src.dispute_packet import generate_dispute_packet_pdf
 from src.reconciliation_engine import (
     DISCREPANCY_FLAGGED,
     REVIEW_INCOMPLETE,
@@ -32,12 +34,22 @@ from src.supabase_data import (
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 OUTLOOK_FROM_EMAIL = "nadiaravindra07@outlook.com"
-HANDLED_STATUSES = {"OVERRIDE_APPROVED", "DISPUTED", "SCALE_TICKET_REQUESTED"}
+HANDLED_STATUSES = {
+    "OVERRIDE_APPROVED",
+    "DISPUTED",
+    "SCALE_TICKET_REQUESTED",
+    "REBUTTAL_RECEIVED",
+    "CLOSED_RESOLVED",
+    "CLOSED_OVERRIDDEN",
+}
 AUDIT_STATUS_LABELS = {
     "OVERRIDE_APPROVED": "Override approved",
     "DISPUTED": "Disputed",
     "SCALE_TICKET_REQUESTED": "Scale ticket requested",
     "UNDER_REVIEW": "Under review",
+    "REBUTTAL_RECEIVED": "REBUTTAL_RECEIVED (Carrier rebuttal received)",
+    "CLOSED_RESOLVED": "CLOSED_RESOLVED (Credit Memo Issued)",
+    "CLOSED_OVERRIDDEN": "CLOSED_OVERRIDDEN (Dispute Conceded)",
 }
 
 
@@ -77,6 +89,35 @@ def _format_invoice_accuracy(
 
 def _dispute_memo_button_label(has_generated: bool) -> str:
     return "Regenerate dispute memo" if has_generated else "Generate dispute memo"
+
+
+def _rebuttal_sla(deadline: object, audit_status: object = "") -> str:
+    if audit_status == "REBUTTAL_RECEIVED":
+        return "Response received"
+    if audit_status in {"CLOSED_RESOLVED", "CLOSED_OVERRIDDEN"}:
+        return "Closed"
+    if deadline is None or not str(deadline).strip():
+        return "—"
+    parsed_deadline = pd.to_datetime(str(deadline), utc=True, errors="coerce")
+    if pd.isna(parsed_deadline):
+        return "—"
+    days_remaining = (
+        parsed_deadline.date() - datetime.now(timezone.utc).date()
+    ).days
+    if days_remaining < 0:
+        return f"{abs(days_remaining)} days overdue"
+    if days_remaining == 0:
+        return "Due today"
+    return f"{days_remaining} days remaining"
+
+
+def _dispute_packet_filename(invoice_number: str) -> str:
+    safe_invoice_number = "".join(
+        character
+        for character in invoice_number
+        if character.isascii() and (character.isalnum() or character in "._-")
+    )
+    return f"Dispute_Packet_{safe_invoice_number or 'invoice'}.pdf"
 
 
 def _default_carrier_email(selected: pd.Series) -> str:
@@ -143,6 +184,9 @@ def _weight_delta(value: object) -> str:
 
 
 def _primary_root_cause(row: pd.Series) -> str:
+    duplicate_of = row.get("duplicate_of_invoice_id")
+    if isinstance(duplicate_of, str) and duplicate_of.strip():
+        return f"Duplicate bill — previously processed {duplicate_of}"
     if not bool(row.get("receipt_found")):
         return "⚪ Missing Scale Receipt"
 
@@ -210,6 +254,8 @@ def _workbench_table_html(
                 classes.append("status-cell")
                 if status == DISCREPANCY_FLAGGED:
                     classes.append("status-flagged")
+                elif status == "DUPLICATE_BILLING_BLOCKED":
+                    classes.append("status-duplicate")
                 elif status == REVIEW_REQUIRED:
                     classes.append("status-review")
                 elif status == REVIEW_INCOMPLETE:
@@ -220,6 +266,8 @@ def _workbench_table_html(
                 classes.append("receipt-found" if text == "Found" else "receipt-missing")
             elif column == "Discrepancy (Total Δ)" and status == DISCREPANCY_FLAGGED:
                 classes.append("discrepancy-flagged")
+            elif column == "Duplicate Match" and text != "—":
+                classes.extend(["discrepancy-flagged", "duplicate-match"])
             elif column == "Variance" and (
                 text.startswith("+") or "Overweight" in text
             ):
@@ -343,12 +391,13 @@ def _comparison_table(row: pd.Series) -> pd.DataFrame:
 
 def _save_resolution(
     client,
+    invoice_id: str,
     invoice_number: str,
     audit_status: str,
     audit_note: str,
 ) -> None:
     try:
-        update_invoice_audit(client, invoice_number, audit_status, audit_note)
+        update_invoice_audit(client, invoice_id, audit_status, audit_note)
     except Exception as error:
         st.error(f"Could not save the resolution for {invoice_number}: {error}")
         return
@@ -421,8 +470,14 @@ st.markdown(
         font-weight: 600;
     }
     table.workbench-table .status-flagged,
+    table.workbench-table .status-duplicate,
     table.workbench-table .receipt-missing {
         background: #c63b40;
+    }
+    table.workbench-table .status-duplicate,
+    table.workbench-table .duplicate-match {
+        white-space: normal;
+        overflow-wrap: anywhere;
     }
     table.workbench-table .status-review {
         background: #b58800;
@@ -516,12 +571,16 @@ def render_audit() -> None:
     audited["status"] = audited["audit_status"].where(
         audited["audit_status"].ne(""), audited["reconciliation_status"]
     )
+    duplicate_mask = audited["duplicate_of_invoice_id"].notna()
+    audited.loc[duplicate_mask, "status"] = "DUPLICATE_BILLING_BLOCKED"
     handled = audited["audit_status"].isin(HANDLED_STATUSES)
     exception_rows = audited[
-        audited["reconciliation_status"].ne(TOUCHLESS_APPROVED) & ~handled
+        audited["reconciliation_status"].ne(TOUCHLESS_APPROVED)
+        & (~handled | duplicate_mask)
     ]
     history_rows = audited[
-        audited["reconciliation_status"].eq(TOUCHLESS_APPROVED) | handled
+        (audited["reconciliation_status"].eq(TOUCHLESS_APPROVED) | handled)
+        & ~duplicate_mask
     ]
 
     metrics = summarize(audited)
@@ -589,7 +648,9 @@ def render_audit() -> None:
         visible = exception_rows.copy()
         if status_filter == "Disputed / flagged":
             visible = visible[
-                visible["reconciliation_status"].eq(DISCREPANCY_FLAGGED)
+                visible["reconciliation_status"].isin(
+                    [DISCREPANCY_FLAGGED, "DUPLICATE_BILLING_BLOCKED"]
+                )
             ]
         elif status_filter == "Under review":
             visible = visible[
@@ -613,9 +674,11 @@ def render_audit() -> None:
                 invoice_search, case=False, na=False
             )
         ]
-    visible = visible.sort_values(
-        ["total_overbill", "weight_variance_lbs"],
-        ascending=[False, False],
+    visible = visible.assign(
+        _duplicate_priority=visible["duplicate_of_invoice_id"].notna()
+    ).sort_values(
+        ["_duplicate_priority", "total_overbill", "weight_variance_lbs"],
+        ascending=[False, False, False],
         na_position="last",
     )
 
@@ -632,13 +695,28 @@ def render_audit() -> None:
                 "Invoice ID": visible["invoice_number"],
                 "Carrier": visible["carrier_name"],
                 "PO Number": visible["po_number"],
-                "Status": visible["status"],
+                "Status": visible["status"].map(
+                    lambda status: AUDIT_STATUS_LABELS.get(status, status)
+                ),
                 "Primary Root Cause": visible.apply(_primary_root_cause, axis=1),
+                "Duplicate Match": visible["duplicate_of_invoice_id"].map(
+                    lambda original: (
+                        f"Duplicate bill of previously processed {original}"
+                        if isinstance(original, str) and original.strip()
+                        else "—"
+                    )
+                ),
                 "Base Δ": visible["base_variance"].map(_money_delta),
                 "Fuel Δ": visible["fuel_variance"].map(_money_delta),
                 "Acc Δ": visible["accessorial_variance"].map(_money_delta),
                 "Wt Δ": visible["weight_variance_lbs"].map(_weight_delta),
                 "Discrepancy (Total Δ)": visible["total_overbill"].map(format_money),
+                "Rebuttal Window (SLA)": visible.apply(
+                    lambda row: _rebuttal_sla(
+                        row.get("rebuttal_deadline"), row.get("audit_status")
+                    ),
+                    axis=1,
+                ),
                 "Receipt": visible["receipt_found"].map(
                     lambda found: "Found" if bool(found) else "Missing"
                 ),
@@ -648,18 +726,28 @@ def render_audit() -> None:
             _workbench_table_html(
                 display,
                 table_class="worklist-table",
-                column_widths=[8, 11, 8, 14, 19, 6, 6, 6, 6, 10, 6],
+                column_widths=[6, 8, 6, 11, 14, 14, 5, 5, 5, 5, 8, 8, 5],
             ),
             unsafe_allow_html=True,
         )
 
+        invoice_labels = {
+            str(row["invoice_id"]): (
+                f"{row['invoice_number']} ({row['invoice_id']})"
+                if str(row["invoice_number"]) != str(row["invoice_id"])
+                else str(row["invoice_number"])
+            )
+            for _, row in visible.iterrows()
+        }
         selected_id = st.selectbox(
             "Select invoice",
-            visible["invoice_number"].tolist(),
+            list(invoice_labels),
+            format_func=invoice_labels.__getitem__,
             index=0,
             key=f"invoice_selector_{worklist_view}",
         )
-        selected = visible.loc[visible["invoice_number"].eq(selected_id)].iloc[0]
+        selected = visible.loc[visible["invoice_id"].astype(str).eq(selected_id)].iloc[0]
+        selected_number = str(selected["invoice_number"])
         with st.container():
             if not selected["receipt_found"]:
                 st.warning("No warehouse receipt was found for this purchase order.")
@@ -673,6 +761,23 @@ def render_audit() -> None:
                 ),
                 unsafe_allow_html=True,
             )
+            financial_summary = st.columns(3)
+            financial_summary[0].metric(
+                "Total Invoiced Amount", format_money(selected.get("total_invoiced"))
+            )
+            financial_summary[1].metric(
+                "Withheld / Disputed Amount",
+                f"-{format_money(selected.get('disputed_amount'))}",
+            )
+            financial_summary[2].metric(
+                "Net Approved Remittance",
+                format_money(selected.get("approved_remittance")),
+            )
+            rebuttal_sla = _rebuttal_sla(
+                selected.get("rebuttal_deadline"), selected.get("audit_status")
+            )
+            if rebuttal_sla != "—":
+                st.info(f"Rebuttal Window (SLA): {rebuttal_sla}")
             osd_notes = selected.get("osd_notes")
             if isinstance(osd_notes, str) and osd_notes.strip():
                 st.warning(f"Warehouse OS&D note: {osd_notes}")
@@ -688,10 +793,9 @@ def render_audit() -> None:
                     ),
                     label_visibility="collapsed",
                 )
-                action_columns = st.columns(4)
+                action_columns = st.columns(3)
                 actions = (
                     ("Mark Under Review", "UNDER_REVIEW"),
-                    ("Dispute Carrier Bill", "DISPUTED"),
                     ("Approve with Override", "OVERRIDE_APPROVED"),
                     ("Request Revised Scale Ticket", "SCALE_TICKET_REQUESTED"),
                 )
@@ -702,16 +806,63 @@ def render_audit() -> None:
                         label,
                         key=f"action_{audit_status}_{selected_id}",
                         use_container_width=True,
+                        disabled=(
+                            audit_status == "OVERRIDE_APPROVED"
+                            and pd.notna(selected.get("duplicate_of_invoice_id"))
+                        ),
                     ):
                         _save_resolution(
                             client,
                             selected_id,
+                            selected_number,
                             audit_status,
                             audit_note,
                         )
 
+            if selected["audit_status"] in {"DISPUTED", "REBUTTAL_RECEIVED"}:
+                st.markdown("#### Dispute lifecycle")
+                lifecycle_note = st.text_area(
+                    "Carrier response / resolution note",
+                    key=f"lifecycle_note_{selected_id}",
+                    placeholder="Summarize the carrier's response or credit memo.",
+                )
+                if selected["audit_status"] == "DISPUTED":
+                    lifecycle_actions = (
+                        ("Record Carrier Rebuttal", "REBUTTAL_RECEIVED"),
+                        ("Close — Credit Memo Issued", "CLOSED_RESOLVED"),
+                        ("Close — Dispute Conceded", "CLOSED_OVERRIDDEN"),
+                    )
+                else:
+                    lifecycle_actions = (
+                        ("Close — Credit Memo Issued", "CLOSED_RESOLVED"),
+                        ("Close — Dispute Conceded", "CLOSED_OVERRIDDEN"),
+                    )
+                for column, (label, audit_status) in zip(
+                    st.columns(len(lifecycle_actions)),
+                    lifecycle_actions,
+                    strict=True,
+                ):
+                    if column.button(
+                        label,
+                        key=f"lifecycle_{audit_status}_{selected_id}",
+                        use_container_width=True,
+                    ):
+                        _save_resolution(
+                            client,
+                            selected_id,
+                            selected_number,
+                            audit_status,
+                            lifecycle_note,
+                        )
+
             if selected["reconciliation_status"] == DISCREPANCY_FLAGGED or (
-                selected["audit_status"] == "DISPUTED"
+                selected["audit_status"]
+                in {
+                    "DISPUTED",
+                    "REBUTTAL_RECEIVED",
+                    "CLOSED_RESOLVED",
+                    "CLOSED_OVERRIDDEN",
+                }
             ):
                 st.markdown("#### Carrier dispute memo")
                 memo_key = f"dispute_memo_{selected_id}"
@@ -761,7 +912,11 @@ def render_audit() -> None:
                         )
                     st.session_state[dispatch_seen_key] = dispatch_status
 
-                    memo_actions = st.columns(2)
+                    packet_filename = _dispute_packet_filename(selected_number)
+                    packet_pdf = generate_dispute_packet_pdf(
+                        selected.to_dict(), memo
+                    )
+                    memo_actions = st.columns(3)
                     with memo_actions[0]:
                         if st.button(
                             "Send As Email",
@@ -775,9 +930,17 @@ def render_audit() -> None:
                         st.download_button(
                             "Download dispute memo",
                             data=memo,
-                            file_name=f"{selected_id}_dispute.txt",
+                            file_name=f"{selected_number}_dispute.txt",
                             mime="text/plain",
                             key=f"download_memo_{selected_id}",
+                        )
+                    with memo_actions[2]:
+                        st.download_button(
+                            "Download Evidence Packet (PDF)",
+                            data=packet_pdf,
+                            file_name=packet_filename,
+                            mime="application/pdf",
+                            key=f"download_packet_{selected_id}",
                         )
 
                     composer_key = f"show_dispute_email_{selected_id}"
@@ -829,6 +992,11 @@ def render_audit() -> None:
                                     height=260,
                                     key=f"dispute_email_body_{selected_id}",
                                 )
+                                attach_evidence = st.checkbox(
+                                    f"Attach Verified Evidence Packet ({packet_filename})",
+                                    value=True,
+                                    key=f"attach_evidence_{selected_id}",
+                                )
                                 send_dispatch = st.form_submit_button(
                                     "Confirm & Send", type="primary"
                                 )
@@ -854,6 +1022,16 @@ def render_audit() -> None:
                                     cc_email=cc_email,
                                     subject=subject,
                                     body=body or "",
+                                    evidence_packet=(
+                                        generate_dispute_packet_pdf(
+                                            selected.to_dict(), body or ""
+                                        )
+                                        if attach_evidence
+                                        else None
+                                    ),
+                                    evidence_filename=(
+                                        packet_filename if attach_evidence else None
+                                    ),
                                 )
                             except Exception as error:
                                 st.error(

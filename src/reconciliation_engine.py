@@ -34,6 +34,7 @@ NUMERIC_COLUMNS = {
     "billed_weight_lbs", "actual_scale_weight_lbs",
     "contracted_base_rate", "contracted_fuel_surcharge", "contracted_expected_weight",
     "approved_accessorial_allowance", "billed_chargeable_weight", "certified_net_scale_weight",
+    "invoice_total_due",
 }
 
 
@@ -196,6 +197,60 @@ def _validate_inputs(frames: dict[str, pd.DataFrame]) -> None:
             raise ValueError(f"{source_name} is missing columns: {', '.join(sorted(missing_columns))}")
 
 
+def _mark_duplicate_invoices(invoices: pd.DataFrame) -> pd.DataFrame:
+    """Mark later invoices that repeat an invoice number or shipment identity."""
+    marked = invoices.copy().reset_index(drop=True)
+    marked["duplicate_of_invoice_id"] = pd.NA
+    if marked.empty:
+        return marked
+
+    invoice_ids = marked.get(
+        "invoice_id", marked["invoice_number"]
+    ).fillna(marked["invoice_number"]).astype("string")
+    source_order = pd.Series(range(len(marked)), index=marked.index)
+    if "created_at" in marked:
+        created_at = pd.to_datetime(marked["created_at"], errors="coerce", utc=True)
+        order = pd.DataFrame(
+            {"created_at": created_at, "source_order": source_order},
+            index=marked.index,
+        ).sort_values(["created_at", "source_order"], na_position="last", kind="stable")
+        ordered_indices = order.index
+    else:
+        ordered_indices = marked.index
+
+    prior_invoice_numbers: dict[str, str] = {}
+    prior_triplets: dict[tuple[str, str, str], str] = {}
+    for index in ordered_indices:
+        invoice_number_value = marked.at[index, "invoice_number"]
+        invoice_number = (
+            str(invoice_number_value).strip().casefold()
+            if pd.notna(invoice_number_value)
+            else ""
+        )
+        carrier_value = marked.at[index, "carrier_name"]
+        carrier = (
+            str(carrier_value).strip().casefold()
+            if pd.notna(carrier_value)
+            else ""
+        )
+        bol_value = marked.at[index, "bol_number"] if "bol_number" in marked else pd.NA
+        po_value = marked.at[index, "po_number"]
+        bol = str(bol_value).strip().casefold() if pd.notna(bol_value) else ""
+        po_number = str(po_value).strip().casefold() if pd.notna(po_value) else ""
+        current_id = str(invoice_ids.loc[index])
+        triplet = (carrier, bol, po_number)
+        duplicate_id = prior_invoice_numbers.get(invoice_number) if invoice_number else None
+        if duplicate_id is None and all(triplet):
+            duplicate_id = prior_triplets.get(triplet)
+        if duplicate_id is not None:
+            marked.at[index, "duplicate_of_invoice_id"] = duplicate_id
+        if invoice_number:
+            prior_invoice_numbers.setdefault(invoice_number, current_id)
+        if all(triplet):
+            prior_triplets.setdefault(triplet, current_id)
+    return marked
+
+
 def reconcile(
     purchase_orders: pd.DataFrame,
     invoices: pd.DataFrame,
@@ -216,6 +271,7 @@ def reconcile(
         for name, frame in raw_frames.items()
     }
     _validate_inputs(frames)
+    frames["invoices"] = _mark_duplicate_invoices(frames["invoices"])
 
     merged = frames["invoices"].merge(frames["purchase_orders"], on="po_number", how="left", suffixes=("", "_po"))
     merged = merged.merge(
@@ -243,6 +299,28 @@ def reconcile(
     merged["total_overbill"] = (
         merged["base_variance"] + merged["fuel_variance"] + merged["accessorial_variance"]
     ).clip(lower=0)
+    calculated_invoice_total = (
+        merged["billed_base_freight"].fillna(0)
+        + merged["billed_fuel_surcharge"].fillna(0)
+        + merged["billed_accessorial_fee"].fillna(0)
+    )
+    if "invoice_total_due" in merged:
+        supplied_invoice_total = pd.to_numeric(
+            merged["invoice_total_due"], errors="coerce"
+        )
+        merged["total_invoiced"] = supplied_invoice_total.fillna(
+            calculated_invoice_total
+        )
+    else:
+        merged["total_invoiced"] = calculated_invoice_total
+    merged["disputed_amount"] = (
+        pd.to_numeric(merged["total_overbill"], errors="coerce")
+        .fillna(0)
+        .clip(lower=0)
+    )
+    merged["approved_remittance"] = (
+        merged["total_invoiced"] - merged["disputed_amount"]
+    )
     merged["total_contracted_value"] = (
         merged["contracted_base_freight"]
         + merged["agreed_fuel_surcharge"]
@@ -280,6 +358,10 @@ def reconcile(
         "status",
     ] = DISCREPANCY_FLAGGED
     merged.loc[~merged["receipt_found"], "status"] = REVIEW_INCOMPLETE
+    merged.loc[
+        merged["duplicate_of_invoice_id"].notna(),
+        "status",
+    ] = "DUPLICATE_BILLING_BLOCKED"
     return merged.drop(columns=["receipt_match"])
 
 
@@ -399,7 +481,11 @@ def summarize_carrier_billing(
 
 def discrepancy_records(reconciled: pd.DataFrame) -> Iterable[dict]:
     """Yield JSON-friendly records for the dispute agent or workflow adapters."""
-    flagged = reconciled[reconciled["status"].isin([DISCREPANCY_FLAGGED, REVIEW_INCOMPLETE])]
+    flagged = reconciled[
+        reconciled["status"].isin(
+            [DISCREPANCY_FLAGGED, REVIEW_INCOMPLETE, "DUPLICATE_BILLING_BLOCKED"]
+        )
+    ]
     return flagged.where(pd.notna(flagged), None).to_dict(orient="records")
 
 
@@ -415,11 +501,18 @@ def write_discrepancy_queue(reconciled: pd.DataFrame, output_path: str | Path) -
     for record in discrepancy_records(reconciled):
         queue.append(
             {
+                "invoice_id": record.get("invoice_id"),
                 "invoice_number": record.get("invoice_number"),
+                "duplicate_of_invoice_id": record.get("duplicate_of_invoice_id"),
                 "po_number": record.get("po_number"),
                 "carrier_name": record.get("carrier_name"),
                 "status": record.get("status"),
                 "total_overbill": round(numeric(record.get("total_overbill")), 2),
+                "total_invoiced": round(numeric(record.get("total_invoiced")), 2),
+                "disputed_amount": round(numeric(record.get("disputed_amount")), 2),
+                "approved_remittance": round(
+                    numeric(record.get("approved_remittance")), 2
+                ),
                 "variance_pct": round(numeric(record.get("variance_pct")), 6),
                 "base_variance": round(numeric(record.get("base_variance")), 2),
                 "fuel_variance": round(numeric(record.get("fuel_variance")), 2),
@@ -429,7 +522,11 @@ def write_discrepancy_queue(reconciled: pd.DataFrame, output_path: str | Path) -
                 ),
                 "weight_variance_lbs": round(numeric(record.get("weight_variance_lbs")), 2),
                 "receipt_found": bool(record.get("receipt_found")) if pd.notna(record.get("receipt_found")) else False,
-                "actions": ["approve_overcharge", "send_ai_dispute"],
+                "actions": (
+                    ["review_duplicate"]
+                    if record.get("status") == "DUPLICATE_BILLING_BLOCKED"
+                    else ["approve_overcharge", "send_ai_dispute"]
+                ),
             }
         )
     destination = Path(output_path)

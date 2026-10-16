@@ -1,4 +1,6 @@
+import hashlib
 from pathlib import Path
+from types import SimpleNamespace
 
 from generate_mock_pdfs import generate_mock_pdfs
 from src.extractor import parse_carrier_pdf, sync_inbound_pdfs_to_supabase
@@ -104,18 +106,32 @@ def test_sync_inbound_pdfs_upserts_using_invoice_id(tmp_path, monkeypatch):
     captured = {}
 
     class FakeTable:
+        def __init__(self, existing_rows=None):
+            self.existing_rows = existing_rows or []
+            self.records = None
+
+        def select(self, _columns):
+            return self
+
+        def in_(self, _column, _values):
+            return self
+
         def upsert(self, records, on_conflict):
             captured["records"] = records
             captured["on_conflict"] = on_conflict
+            self.records = records
             return self
 
         def execute(self):
-            return None
+            return SimpleNamespace(data=[] if self.records is not None else self.existing_rows)
 
     class FakeClient:
+        def __init__(self, existing_rows=None):
+            self.table_instance = FakeTable(existing_rows)
+
         def table(self, name):
             captured["table"] = name
-            return FakeTable()
+            return self.table_instance
 
     monkeypatch.setattr("src.extractor._create_supabase_client", lambda: FakeClient())
     summary = sync_inbound_pdfs_to_supabase(str(root))
@@ -163,4 +179,85 @@ def test_sync_inbound_pdfs_upserts_using_invoice_id(tmp_path, monkeypatch):
         "rate_per_cwt": 21.3333,
         "handling_unit_count": 4,
         "handling_unit_type": "Pallets / PLT",
+        "source_document_hash": hashlib.sha256(
+            (root / "invoice_INV-1004.pdf").read_bytes()
+        ).hexdigest(),
     }
+
+
+def test_sync_inbound_pdf_preserves_a_rebill_with_the_same_invoice_number(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "inbound"
+    generate_mock_pdfs(root, invoice_numbers={"INV-1007"})
+    captured = {}
+
+    class FakeTable:
+        def __init__(self):
+            self.records = None
+
+        def select(self, _columns):
+            return self
+
+        def in_(self, _column, _values):
+            return self
+
+        def upsert(self, records, on_conflict):
+            captured["records"] = records
+            captured["on_conflict"] = on_conflict
+            self.records = records
+            return self
+
+        def execute(self):
+            if self.records is not None:
+                return SimpleNamespace(data=[])
+            return SimpleNamespace(
+                data=[
+                    {
+                        "invoice_id": "INV-1007",
+                        "invoice_number": "INV-1007",
+                        "source_document_hash": None,
+                        "po_number": "PO-1007",
+                        "carrier_name": "Northstar Freight",
+                        "bol_number": "BOL-1007",
+                        "billed_base_freight": 1000,
+                        "billed_fuel_surcharge": 100,
+                        "billed_accessorial_fee": 0,
+                        "billed_weight_lbs": 10000,
+                        "invoice_total_due": 1100,
+                    }
+                ]
+            )
+
+    class FakeClient:
+        def table(self, name):
+            assert name == "carrier_invoices"
+            return table
+
+    table = FakeTable()
+    monkeypatch.setattr("src.extractor._create_supabase_client", lambda: FakeClient())
+
+    summary = sync_inbound_pdfs_to_supabase(str(root))
+
+    assert summary["processed_count"] == 1
+    assert captured["on_conflict"] == "invoice_id"
+    re_billed = captured["records"][0]
+    assert re_billed["invoice_number"] == "INV-1007"
+    assert re_billed["invoice_id"].startswith("INV-1007-DUP-")
+    assert re_billed["source_document_hash"]
+
+    duplicate_id = re_billed["invoice_id"]
+    duplicate_hash = re_billed["source_document_hash"]
+    captured.clear()
+    table = FakeTable()
+    table.existing_rows = [
+        {
+            "invoice_id": duplicate_id,
+            "invoice_number": "INV-1007",
+            "source_document_hash": duplicate_hash,
+        }
+    ]
+    summary = sync_inbound_pdfs_to_supabase(str(root))
+
+    assert summary["processed_count"] == 1
+    assert captured["records"][0]["invoice_id"] == duplicate_id

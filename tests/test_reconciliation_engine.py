@@ -87,6 +87,54 @@ def test_overbill_math_and_flag_threshold():
     assert result.loc[0, "status"] == DISCREPANCY_FLAGGED
 
 
+def test_short_pay_amounts_use_invoice_total_and_disputed_overbill():
+    po, invoice, receipts = sources()
+    invoice["billed_base_freight"] = 1100
+    invoice["invoice_total_due"] = 1260
+
+    result = reconcile(po, invoice, receipts)
+
+    assert result.loc[0, "total_invoiced"] == 1260
+    assert result.loc[0, "disputed_amount"] == 100
+    assert result.loc[0, "approved_remittance"] == 1160
+
+
+def test_duplicate_invoice_number_blocks_later_invoice_and_identifies_original():
+    po, invoices, receipts = sources()
+    invoices["invoice_id"] = ["invoice-original"]
+    duplicate = invoices.iloc[0].copy()
+    duplicate["invoice_id"] = "invoice-duplicate"
+    invoices = pd.concat([invoices, duplicate.to_frame().T], ignore_index=True)
+
+    result = reconcile(po, invoices, receipts)
+
+    assert result["status"].tolist() == [
+        TOUCHLESS_APPROVED,
+        "DUPLICATE_BILLING_BLOCKED",
+    ]
+    assert result.loc[1, "duplicate_of_invoice_id"] == "invoice-original"
+
+
+def test_duplicate_triplet_blocks_altered_invoice_number_and_queue_has_no_approval(tmp_path):
+    po, invoices, receipts = sources()
+    invoices["invoice_id"] = ["invoice-original"]
+    invoices["bol_number"] = ["BOL-1007"]
+    duplicate = invoices.iloc[0].copy()
+    duplicate["invoice_id"] = "invoice-duplicate"
+    duplicate["invoice_number"] = "INV-1007-DUP"
+    duplicate["carrier_name"] = " carrier "
+    invoices = pd.concat([invoices, duplicate.to_frame().T], ignore_index=True)
+
+    result = reconcile(po, invoices, receipts)
+    queue = write_discrepancy_queue(result, tmp_path / "duplicate-queue.json")
+
+    assert result.loc[1, "status"] == "DUPLICATE_BILLING_BLOCKED"
+    assert result.loc[1, "duplicate_of_invoice_id"] == "invoice-original"
+    blocked_record = next(row for row in queue if row["invoice_id"] == "invoice-duplicate")
+    assert blocked_record["duplicate_of_invoice_id"] == "invoice-original"
+    assert blocked_record["actions"] == ["review_duplicate"]
+
+
 def test_itemized_accessorials_flag_unapproved_code_and_amount(tmp_path):
     po, invoice, receipts = sources()
     po["approved_accessorial_items"] = [[

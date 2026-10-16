@@ -7,6 +7,10 @@ from app import (
     _dispute_memo_button_label,
     _format_invoice_accuracy,
     _leakage_chart_html,
+    _dispute_packet_filename,
+    _primary_root_cause,
+    _rebuttal_sla,
+    _workbench_table_html,
 )
 
 
@@ -27,6 +31,46 @@ def test_default_carrier_email_prefers_saved_recipient_then_carrier_record() -> 
 def test_dispute_memo_button_label_tracks_current_session_generation() -> None:
     assert _dispute_memo_button_label(False) == "Generate dispute memo"
     assert _dispute_memo_button_label(True) == "Regenerate dispute memo"
+
+
+def test_rebuttal_sla_and_evidence_filename_formatting() -> None:
+    deadline = pd.Timestamp.now(tz="UTC") + pd.Timedelta(days=28)
+
+    assert _rebuttal_sla(deadline) == "28 days remaining"
+    assert _rebuttal_sla(deadline, "REBUTTAL_RECEIVED") == "Response received"
+    assert _rebuttal_sla(deadline, "CLOSED_RESOLVED") == "Closed"
+    assert _rebuttal_sla("invalid deadline") == "—"
+    assert _dispute_packet_filename("INV-1007 / duplicate") == (
+        "Dispute_Packet_INV-1007duplicate.pdf"
+    )
+
+
+def test_duplicate_invoice_is_highlighted_with_original_id_in_queue() -> None:
+    duplicate = pd.Series(
+        {
+            "duplicate_of_invoice_id": "INV-1007",
+            "receipt_found": True,
+        }
+    )
+    table = pd.DataFrame(
+        {
+            "Status": ["DUPLICATE_BILLING_BLOCKED"],
+            "Duplicate Match": ["Duplicate bill of previously processed INV-1007"],
+        }
+    )
+
+    html = _workbench_table_html(
+        table,
+        table_class="worklist-table",
+        column_widths=[40, 60],
+    )
+
+    assert _primary_root_cause(duplicate) == (
+        "Duplicate bill — previously processed INV-1007"
+    )
+    assert 'class="status-cell status-duplicate"' in html
+    assert "Duplicate bill of previously processed INV-1007" in html
+    assert 'class="discrepancy-flagged duplicate-match"' in html
 
 
 @pytest.mark.parametrize(

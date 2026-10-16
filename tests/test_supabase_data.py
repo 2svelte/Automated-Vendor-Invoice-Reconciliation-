@@ -1,4 +1,7 @@
+import base64
 from types import SimpleNamespace
+
+import pytest
 
 from src.reconciliation_engine import DISCREPANCY_FLAGGED
 from src.supabase_data import (
@@ -106,6 +109,9 @@ def test_source_columns_include_extended_document_fields():
         "rate_per_cwt",
         "handling_unit_count",
         "handling_unit_type",
+        "source_document_hash",
+        "dispute_date",
+        "rebuttal_deadline",
     }.issubset(SOURCE_COLUMNS["carrier_invoices"])
     assert {
         "incoterms",
@@ -181,27 +187,27 @@ def test_reconcile_supabase_data_uses_all_three_source_tables():
     assert result.loc[0, "base_variance"] == 100
 
 
-def test_update_invoice_audit_writes_resolution_and_requires_matching_invoice():
-    client = FakeUpdateClient([{"invoice_number": "INV-1"}])
+def test_update_invoice_audit_writes_resolution_by_invoice_id():
+    client = FakeUpdateClient([{"invoice_id": "INV-1"}])
 
     update_invoice_audit(
         client,
         "INV-1",
-        "DISPUTED",
+        "CLOSED_RESOLVED",
         "Unapproved accessorial; dispute sent.",
     )
 
-    assert client.table_instance.filters == [("invoice_number", "INV-1")]
+    assert client.table_instance.filters == [("invoice_id", "INV-1")]
     values = client.table_instance.values
     assert values is not None
-    assert values["audit_status"] == "DISPUTED"
+    assert values["audit_status"] == "CLOSED_RESOLVED"
     assert values["audit_note"] == "Unapproved accessorial; dispute sent."
     assert values["audited_at"]
     assert "auditor_name" not in values
 
 
 def test_update_invoice_audit_allows_empty_resolution_note():
-    client = FakeUpdateClient([{"invoice_number": "INV-1"}])
+    client = FakeUpdateClient([{"invoice_id": "INV-1"}])
 
     update_invoice_audit(client, "INV-1", "UNDER_REVIEW", "")
 
@@ -211,11 +217,26 @@ def test_update_invoice_audit_allows_empty_resolution_note():
     assert values["audit_note"] == ""
 
 
+def test_update_invoice_audit_accepts_dispute_lifecycle_states():
+    client = FakeUpdateClient([{"invoice_id": "INV-1"}])
+
+    update_invoice_audit(client, "INV-1", "REBUTTAL_RECEIVED", "Carrier sent a POD.")
+
+    assert client.table_instance.values["audit_status"] == "REBUTTAL_RECEIVED"
+
+
+def test_disputed_status_is_only_set_by_confirmed_dispatch():
+    with pytest.raises(ValueError, match="Unsupported audit status"):
+        update_invoice_audit(
+            FakeUpdateClient([]), "INV-1", "DISPUTED", "Email not confirmed."
+        )
+
+
 def test_update_invoice_audit_rejects_missing_invoice():
     client = FakeUpdateClient([])
 
     try:
-        update_invoice_audit(client, "INV-404", "DISPUTED", "Reason")
+        update_invoice_audit(client, "INV-404", "CLOSED_RESOLVED", "Reason")
     except LookupError as error:
         assert "INV-404" in str(error)
     else:
@@ -244,7 +265,48 @@ def test_queue_dispute_email_calls_atomic_supabase_dispatch_function():
         "p_dispute_cc_email": "audit@example.com",
         "p_dispute_subject": "Billing dispute: INV-1",
         "p_dispute_memo_body": "Please review the attached dispute memo.",
+        "p_dispute_evidence_pdf_base64": None,
+        "p_dispute_evidence_filename": None,
     }
+
+
+def test_queue_dispute_email_encodes_verified_pdf_attachment():
+    client = FakeRpcClient("dispatch-123")
+    packet = b"%PDF-1.4 evidence"
+
+    queue_dispute_email(
+        client,
+        "INV-1",
+        "Northstar Freight",
+        to_email="billing@example.com",
+        cc_email="",
+        subject="Billing dispute: INV-1",
+        body="Please review the attached dispute memo.",
+        evidence_packet=packet,
+        evidence_filename="Dispute_Packet_INV-1.pdf",
+    )
+
+    assert client.params["p_dispute_evidence_pdf_base64"] == base64.b64encode(
+        packet
+    ).decode("ascii")
+    assert client.params["p_dispute_evidence_filename"] == "Dispute_Packet_INV-1.pdf"
+
+
+def test_queue_dispute_email_rejects_non_pdf_evidence():
+    client = FakeRpcClient("dispatch-123")
+
+    with pytest.raises(ValueError, match="not a valid PDF"):
+        queue_dispute_email(
+            client,
+            "INV-1",
+            "Northstar Freight",
+            to_email="billing@example.com",
+            cc_email="",
+            subject="Billing dispute: INV-1",
+            body="Please review the attached dispute memo.",
+            evidence_packet=b"not a pdf",
+            evidence_filename="Dispute_Packet_INV-1.pdf",
+        )
 
 
 def test_queue_dispute_email_validates_recipient_and_required_content():
