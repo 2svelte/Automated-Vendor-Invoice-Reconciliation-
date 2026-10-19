@@ -73,7 +73,9 @@ def _extract_weight(text: str, pattern: str, default: float = 0.0) -> float:
     match = re.search(pattern, text, flags=re.IGNORECASE | re.MULTILINE)
     if not match:
         return float(default)
-    return _clean_number(match.group(1).replace("lbs", "").strip())
+    weight = _clean_number(match.group(1))
+    unit = (match.group(2) or "lbs").lower()
+    return round(weight / 0.45359237, 2) if unit == "kg" else weight
 
 
 def parse_carrier_pdf(pdf_path: str | os.PathLike[str]) -> dict[str, object]:
@@ -152,7 +154,8 @@ def parse_carrier_pdf(pdf_path: str | os.PathLike[str]) -> dict[str, object]:
         )
     billed_weight = _extract_weight(
         text,
-        r"(?:Billed\s*Chargeable\s*Weight|Certified\s*Scale\s*Weight):\s*([\d,]+)",
+        r"(?:Billed\s*Chargeable\s*Weight|Certified\s*Scale\s*Weight):\s*"
+        r"([\d,]+(?:\.\d+)?)\s*(lbs?|kg)?",
     )
     base_rate = _extract_money(
         text,

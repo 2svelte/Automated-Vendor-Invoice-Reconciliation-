@@ -57,6 +57,8 @@ def test_mock_invoice_includes_bill_to_dispute_contact(tmp_path):
     assert "Nadia R." in text
     assert "Accounts Payable Manager" in text
     assert "Phone: 0412345678" in text
+    assert "2,721.554 kg" in text
+    assert "lbs" not in text
 
 
 def test_generate_mock_pdfs_creates_expected_files(tmp_path):

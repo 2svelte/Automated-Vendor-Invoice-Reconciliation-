@@ -10,6 +10,7 @@ from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 
 DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parent / "data" / "sample_inbound_pdfs"
+LB_TO_KG = 0.45359237
 
 
 def generate_mock_pdfs(
@@ -150,7 +151,10 @@ def generate_mock_pdfs(
             ("Delivery Date", sample["delivery_date"]),
             ("Origin", sample["origin"]),
             ("Destination", sample["destination"]),
-            ("Billed Chargeable Weight", f"{sample['weight']:,} lbs"),
+            (
+                "Billed Chargeable Weight",
+                f"{sample['weight'] * LB_TO_KG:,.3f} kg",
+            ),
             ("Freight Class", sample["freight_class"]),
             ("NMFC Code", sample["nmfc_code"]),
             ("Rate Tariff Reference", sample["rate_tariff_reference"]),

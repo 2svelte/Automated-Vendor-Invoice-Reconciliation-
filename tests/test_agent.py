@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.agent import _prompt, draft_dispute, short_pay_statement
+from src.agent import _prompt, draft_dispute, fuel_dispute_line, short_pay_statement
 
 
 def exception_record():
@@ -105,3 +105,50 @@ def test_short_pay_statement_uses_itemized_unauthorized_accessorials():
         "variance ($430.00) and fuel surcharge variance ($20.00) and unauthorized "
         "driver detention ($90.00)."
     )
+
+
+def test_fuel_dispute_line_uses_verified_aip_values():
+    line = fuel_dispute_line(
+        {
+            "invoice_number": "INV-1007",
+            "billed_fuel_surcharge": 285,
+            "authorized_fuel_surcharge": 123.75,
+            "fuel_index_price": 1.95,
+            "fuel_base_peg": 1.5,
+            "fuel_overcharge": 161.25,
+        }
+    )
+
+    assert line == (
+        "Fuel surcharge disputed on INV-1007: Billed at $285.00 AUD vs. contractual "
+        "allowance of $123.75 AUD based on published AIP Diesel Index of $1.95 AUD/L "
+        "(Agreed contract peg $1.50 AUD/L @ 0.5% per 5¢ step). Overcharge of "
+        "$161.25 AUD has been deducted from remittance."
+    )
+
+
+def test_generated_memo_appends_the_deterministic_fuel_dispute_line(monkeypatch):
+    response = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content="AI-generated letter"))]
+    )
+
+    class FakeOpenAI:
+        def __init__(self, api_key):
+            self.chat = SimpleNamespace(
+                completions=SimpleNamespace(create=lambda **kwargs: response)
+            )
+
+    monkeypatch.setattr("openai.OpenAI", FakeOpenAI)
+    invoice = {
+        **exception_record(),
+        "invoice_number": "INV-1007",
+        "billed_fuel_surcharge": 285,
+        "authorized_fuel_surcharge": 123.75,
+        "fuel_index_price": 1.95,
+        "fuel_base_peg": 1.5,
+        "fuel_overcharge": 161.25,
+    }
+
+    memo = draft_dispute(invoice, api_key="test-key")
+
+    assert memo.endswith(fuel_dispute_line(invoice))

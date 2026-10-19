@@ -75,9 +75,12 @@ def short_pay_statement(exception: dict[str, Any]) -> str:
         reasons.append(f"base rate variance (${base_variance:,.2f})")
     elif base_variance < 0:
         reasons.append(f"base rate credit (-${abs(base_variance):,.2f})")
-    if fuel_variance > 0:
-        reasons.append(f"fuel surcharge variance (${fuel_variance:,.2f})")
-    elif fuel_variance < 0:
+    fuel_overcharge = amount(
+        exception.get("fuel_overcharge", max(0.0, fuel_variance))
+    )
+    if fuel_overcharge > 0:
+        reasons.append(f"fuel surcharge variance (${fuel_overcharge:,.2f})")
+    elif fuel_variance < 0 and "fuel_overcharge" not in exception:
         reasons.append(f"fuel surcharge credit (-${abs(fuel_variance):,.2f})")
 
     unauthorized_items = exception.get("unauthorized_accessorial_items")
@@ -108,6 +111,32 @@ def short_pay_statement(exception: dict[str, Any]) -> str:
     )
 
 
+def fuel_dispute_line(exception: dict[str, Any]) -> str:
+    """Render the verified AIP fuel overcharge as a deterministic memo line."""
+    try:
+        overcharge = float(exception.get("fuel_overcharge", 0))
+        billed = float(exception.get("billed_fuel_surcharge", 0))
+        authorized = float(exception.get("authorized_fuel_surcharge", 0))
+        index_price = float(exception.get("fuel_index_price", 0))
+        base_peg = float(exception.get("fuel_base_peg", 1.5))
+    except (TypeError, ValueError):
+        return ""
+    if not all(
+        math.isfinite(value)
+        for value in (overcharge, billed, authorized, index_price, base_peg)
+    ) or overcharge <= 0:
+        return ""
+
+    invoice_number = str(exception.get("invoice_number") or "invoice").strip()
+    return (
+        f"Fuel surcharge disputed on {invoice_number}: Billed at ${billed:,.2f} AUD "
+        f"vs. contractual allowance of ${authorized:,.2f} AUD based on published "
+        f"AIP Diesel Index of ${index_price:.2f} AUD/L (Agreed contract peg "
+        f"${base_peg:.2f} AUD/L @ 0.5% per 5¢ step). Overcharge of "
+        f"${overcharge:,.2f} AUD has been deducted from remittance."
+    )
+
+
 def draft_dispute(exception: dict[str, Any], api_key: str | None = None) -> str:
     """Draft a dispute letter using OpenAI."""
     key = api_key or os.getenv("OPENAI_API_KEY")
@@ -128,4 +157,6 @@ def draft_dispute(exception: dict[str, Any], api_key: str | None = None) -> str:
     content = response.choices[0].message.content
     if not content or not content.strip():
         raise RuntimeError("OpenAI returned an empty dispute letter.")
-    return f"{content.strip()}\n\n{short_pay_statement(exception)}"
+    memo = f"{content.strip()}\n\n{short_pay_statement(exception)}"
+    fuel_line = fuel_dispute_line(exception)
+    return f"{memo}\n\n{fuel_line}" if fuel_line else memo

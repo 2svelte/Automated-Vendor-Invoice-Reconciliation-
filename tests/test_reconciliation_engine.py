@@ -3,8 +3,11 @@ import pytest
 
 from src.reconciliation_engine import (
     DISCREPANCY_FLAGGED,
+    FUEL_INDEX_MAP,
     REVIEW_INCOMPLETE,
     TOUCHLESS_APPROVED,
+    UNAUTHORIZED_FUEL_CREEP,
+    calculate_authorized_fuel,
     reconcile,
     summarize_carrier_billing,
     summarize,
@@ -16,11 +19,11 @@ def sources(receipt_weight=1000, billed_weight=1000, receipt=True):
     po = pd.DataFrame([{
         "po_number": "PO-1", "vendor_id": "V-1", "carrier_name": "Carrier",
         "origin": "A", "destination": "B", "contracted_base_freight": 1000,
-        "agreed_fuel_surcharge": 100, "max_accessorial_allowance": 50,
+        "agreed_fuel_surcharge": 45, "max_accessorial_allowance": 50,
     }])
     invoice = pd.DataFrame([{
         "invoice_number": "INV-1", "po_number": "PO-1", "carrier_name": "Carrier",
-        "billed_base_freight": 1000, "billed_fuel_surcharge": 100,
+        "billed_base_freight": 1000, "billed_fuel_surcharge": 45,
         "billed_accessorial_fee": 50, "billed_weight_lbs": billed_weight,
         "invoice_date": "2026-09-01",
     }])
@@ -37,6 +40,70 @@ def test_clean_three_way_match_is_touchless():
     assert result.loc[0, "total_overbill"] == 0
 
 
+def test_aip_fuel_calculation_uses_weekly_index_and_decimal_steps():
+    authorization = calculate_authorized_fuel(2750, "2026-10-15")
+
+    assert authorization == {
+        "index_price": FUEL_INDEX_MAP["2026-10-12"],
+        "base_peg": 1.5,
+        "steps": 9,
+        "allowed_pct": 0.045,
+        "authorized_amount": 123.75,
+    }
+
+    fallback = calculate_authorized_fuel(2750, "2026-11-02")
+    assert fallback["index_price"] == 1.95
+    assert fallback["steps"] == 9
+
+
+@pytest.mark.parametrize(
+    ("week", "index_price", "steps", "allowed_pct", "authorized_amount"),
+    [
+        ("2026-10-05", 1.88, 7, 0.035, 35.0),
+        ("2026-10-19", 1.92, 8, 0.04, 40.0),
+    ],
+)
+def test_aip_calculation_uses_each_published_benchmark(
+    week, index_price, steps, allowed_pct, authorized_amount
+):
+    authorization = calculate_authorized_fuel(1000, week)
+
+    assert authorization["index_price"] == index_price
+    assert authorization["steps"] == steps
+    assert authorization["allowed_pct"] == allowed_pct
+    assert authorization["authorized_amount"] == authorized_amount
+
+
+def test_aip_fuel_overcharge_drives_signed_variance_remittance_and_queue(tmp_path):
+    po, invoice, receipts = sources()
+    po.loc[0, "contracted_base_freight"] = 2750
+    po["agreed_fuel_surcharge"] = [247.5]
+    po.loc[0, "max_accessorial_allowance"] = 90
+    po.loc[0, "contracted_expected_weight"] = 14000
+    po["approved_accessorial_items"] = [[{"code": "LFT", "amount": 90}]]
+    invoice.loc[0, "billed_base_freight"] = 3180
+    invoice.loc[0, "billed_fuel_surcharge"] = 285
+    invoice.loc[0, "invoice_total_due"] = 3645
+    invoice.loc[0, "billed_accessorial_fee"] = 180
+    invoice.loc[0, "billed_weight_lbs"] = 15000
+    invoice["accessorial_items"] = [[
+        {"code": "LFT", "amount": 90},
+        {"code": "DET", "amount": 90},
+    ]]
+    receipts.loc[0, "actual_scale_weight_lbs"] = 14000
+
+    result = reconcile(po, invoice, receipts)
+    queue = write_discrepancy_queue(result, tmp_path / "queue.json")
+
+    assert result.loc[0, "authorized_fuel_surcharge"] == 123.75
+    assert result.loc[0, "fuel_variance"] == pytest.approx(-161.25)
+    assert result.loc[0, "status"] == DISCREPANCY_FLAGGED
+    assert result.loc[0, "root_cause"] == UNAUTHORIZED_FUEL_CREEP
+    assert result.loc[0, "disputed_amount"] == pytest.approx(681.25)
+    assert result.loc[0, "approved_remittance"] == pytest.approx(2963.75)
+    assert queue[0]["root_cause"] == UNAUTHORIZED_FUEL_CREEP
+
+
 def test_weight_tolerance_is_two_percent():
     within = reconcile(*sources(receipt_weight=1000, billed_weight=1020))
     over = reconcile(*sources(receipt_weight=1000, billed_weight=1021))
@@ -47,11 +114,11 @@ def test_weight_tolerance_is_two_percent():
 
 def test_configured_fuel_tolerance_changes_status_not_audited_variance():
     po, invoice, receipts = sources()
-    invoice["billed_fuel_surcharge"] = 100.5
+    invoice["billed_fuel_surcharge"] = 45.5
 
     result = reconcile(po, invoice, receipts, fuel_tolerance=1.0)
 
-    assert result.loc[0, "fuel_variance"] == pytest.approx(0.5)
+    assert result.loc[0, "fuel_variance"] == pytest.approx(-0.5)
     assert result.loc[0, "total_overbill"] == pytest.approx(0.5)
     assert result.loc[0, "status"] == TOUCHLESS_APPROVED
 
@@ -81,9 +148,10 @@ def test_overbill_math_and_flag_threshold():
     invoice.loc[0, "billed_fuel_surcharge"] = 180
     invoice.loc[0, "billed_accessorial_fee"] = 100
     result = reconcile(po, invoice, receipts)
-    assert result.loc[0, "fuel_variance"] == 80
+    assert result.loc[0, "fuel_variance"] == -135
+    assert result.loc[0, "fuel_overcharge"] == 135
     assert result.loc[0, "accessorial_variance"] == 50
-    assert result.loc[0, "total_overbill"] == 130
+    assert result.loc[0, "total_overbill"] == 185
     assert result.loc[0, "status"] == DISCREPANCY_FLAGGED
 
 

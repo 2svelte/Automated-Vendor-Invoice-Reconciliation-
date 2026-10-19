@@ -29,7 +29,7 @@ py -3.10 -c "from src.extractor import sync_inbound_pdfs_to_supabase; sync_inbou
 
 The command scans every PDF in the folder each time it runs. The importer stores a source-document hash so reprocessing the same PDF remains idempotent, while a different PDF reusing the same invoice number is retained under a unique invoice ID. The reconciliation loader detects duplicate invoice numbers and repeated carrier + BOL + PO triplets, marks later bills `DUPLICATE_BILLING_BLOCKED`, and identifies the original invoice. Duplicate bills cannot be approved for payment.
 
-The dashboard refreshes the three-way reconciliation every 15 seconds. For each invoice it shows total invoiced, disputed/withheld amount, and net approved remittance. Dispute memos include a deterministic short-pay statement. Reviewers can mark an exception under review, approve it with an override, or request a revised scale ticket. The audit trail records lifecycle changes by invoice ID. From a reviewed memo, download a one-page PDF voucher or open the **Send As Email** composer. The voucher includes invoice variances, certified scale-ticket data, receiving details, receiver signature, and OS&D notes. The composer reads **To** from the invoice's `carrier_email` field and displays the fixed **From** address `nadiaravindra07@outlook.com`; the verified PDF is attached by default. On **Confirm & Send**, the app atomically queues the dispatch in Supabase as `PENDING` and sets the invoice to `DISPUTED`, then closes the composer. Power Automate Desktop polls Supabase for pending dispatches, sends them via Outlook, and updates their status to `SENT` or `FAILED`. The database starts the 30-day rebuttal deadline after the flow confirms successful delivery.
+The dashboard refreshes the three-way reconciliation every 15 seconds. For each invoice it shows total invoiced, disputed/withheld amount, and net approved remittance. Its AIP fuel audit card shows the departure week's diesel benchmark, contract peg, calculated allowance, and billed-versus-authorized verdict. Scale weights in the reconciliation table and dispute voucher are displayed in kilograms. Dispute memos include a deterministic short-pay statement and an itemized AIP fuel dispute line when applicable. Reviewers can mark an exception under review, approve it with an override, or request a revised scale ticket. The audit trail records lifecycle changes by invoice ID. From a reviewed memo, download a one-page PDF voucher or open the **Send As Email** composer. The voucher includes invoice variances, certified scale-ticket data, receiving details, receiver signature, and OS&D notes. The composer reads **To** from the invoice's `carrier_email` field and displays the fixed **From** address `nadiaravindra07@outlook.com`; the verified PDF is attached by default. On **Confirm & Send**, the app atomically queues the dispatch in Supabase as `PENDING` and sets the invoice to `DISPUTED`, then closes the composer. Power Automate Desktop polls Supabase for pending dispatches, sends them via Outlook, and updates their status to `SENT` or `FAILED`. The database starts the 30-day rebuttal deadline after the flow confirms successful delivery.
 
 The current demo's `carrier_email` value is your Gmail address, so dispatches go to your Gmail inbox—not to freight companies—until you replace each value with the matching carrier's verified address. Outlook can generally send email to Gmail recipients, but your Microsoft 365 tenant's external-recipient policy may restrict it. Power Automate must be authorized to send as `nadiaravindra07@outlook.com`; the From value is not a way to bypass Outlook permissions.
 
@@ -45,22 +45,25 @@ The CSV files are not used by the live dashboard. They remain as historical exam
 - `data/carrier_invoices_raw.csv`: PDF-extracted invoice/PO/BOL identifiers, `billed_chargeable_weight`, linehaul and fuel amounts, itemized `accessorial_items` (JSON), total due, and invoice date.
 - `data/warehouse_goods_receipts.csv`: receipt/PO/BOL and scale-ticket identifiers, `received_timestamp`, receiving dock and trailer details, gross/tare weights, `certified_net_scale_weight`, certification seal, and OS&D notes. These PO and receipt records seed their corresponding Supabase tables; live reconciliation reads those tables rather than the CSV files.
 
-Upstream percentage-based fuel data must be normalized into the monetary `agreed_fuel_surcharge` value before reconciliation.
+The AIP weekly diesel benchmarks are recorded in `src/reconciliation_engine.py` in AUD/L. The shipment's pickup week selects the Monday index date; weeks without a published entry use the documented $1.95/L default. The contractual allowance applies 0.5% of PO base freight for each complete 5¢/L step above the $1.50/L base peg.
 
 ## Business rules
 
 - `base_variance = billed_base_freight - contracted_base_freight`.
-- `fuel_variance = billed_fuel_surcharge - agreed_fuel_surcharge`.
+- `authorized_fuel_surcharge` is calculated from PO base freight and the shipment-week AIP index; `fuel_variance = authorized_fuel_surcharge - billed_fuel_surcharge`, so an overcharge is negative.
+- Fuel overcharges beyond the sidebar tolerance are classified as `DISCREPANCY_FLAGGED` with root cause `UNAUTHORIZED_FUEL_CREEP`; the full amount remains in the withheld/overbill calculation.
 - `accessorial_variance` sums per-code positive overages: billed amount less the PO allowance for that code. A code not listed on the PO has a zero allowance.
-- `total_overbill` is the net base/fuel variance plus positive accessorial overages, floored at zero.
+- `total_overbill = max(0, base_variance - fuel_variance + accessorial_variance)`.
 - `approved_remittance = total_invoiced - disputed_amount`; the withheld amount is the reconciled overbill.
-- `variance_pct` uses `contracted_base_freight + agreed_fuel_surcharge + max_accessorial_allowance` as its denominator.
+- `variance_pct` uses `contracted_base_freight + authorized_fuel_surcharge + max_accessorial_allowance` as its denominator.
 - By default, a billed weight up to 2% above the dock scale weight passes the weight check; the workbench lets an auditor adjust the percentage. Higher overage is flagged, but weight has no invented dollar rate.
 - By default, fuel variances up to $1 are within tolerance. The workbench lets an auditor adjust the dollar tolerance; the reported overbill remains unchanged.
 - Missing receipts produce `REVIEW_INCOMPLETE` and cannot be touchlessly approved.
 - Complete records at or below 1% variance are `TOUCHLESS_APPROVED`.
 - Complete records above 5% variance, or beyond the weight tolerance, are `DISCREPANCY_FLAGGED`.
 - Other complete records are `REVIEW_REQUIRED`.
+
+The PO-1007 fixture retains the repository's existing invoice and scale values. For its $2,750 contracted base and $285 billed fuel, the $1.95/L default benchmark authorizes 4.5% ($123.75) under the specified 0.5%-per-step policy. CSV and Supabase source weight values retain their legacy pound-based field names; the user-facing reconciliation and voucher convert them to kilograms.
 
 The deterministic engine owns all amounts and statuses. The AI layer only drafts language from a structured exception record.
 

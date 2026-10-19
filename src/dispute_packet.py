@@ -14,6 +14,8 @@ from reportlab.lib.units import inch
 from reportlab.pdfgen import canvas
 from reportlab.platypus import KeepInFrame, Paragraph, Spacer, Table, TableStyle
 
+LB_TO_KG = 0.45359237
+
 
 def _text(value: object, fallback: str = "Not provided") -> str:
     if value is None:
@@ -37,7 +39,7 @@ def _money(value: object) -> str:
 
 def _weight(value: object) -> str:
     number = _number(value)
-    return f"{number:,.0f} lb" if number is not None else _text(value)
+    return f"{number * LB_TO_KG:,.0f} kg" if number is not None else _text(value)
 
 
 def _paragraph(value: object, style: ParagraphStyle) -> Paragraph:

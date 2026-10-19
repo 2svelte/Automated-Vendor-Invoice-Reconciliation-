@@ -15,10 +15,16 @@ import streamlit.components.v1 as components
 from src.agent import draft_dispute
 from src.dispute_packet import generate_dispute_packet_pdf
 from src.reconciliation_engine import (
+    BASE_PEG_PRICE,
     DISCREPANCY_FLAGGED,
+    FUEL_INDEX_MAP,
     REVIEW_INCOMPLETE,
     REVIEW_REQUIRED,
+    STEP_INTERVAL,
+    STEP_PERCENTAGE,
     TOUCHLESS_APPROVED,
+    UNAUTHORIZED_FUEL_CREEP,
+    calculate_authorized_fuel,
     summarize_carrier_billing,
     summarize,
     write_discrepancy_queue,
@@ -34,6 +40,7 @@ from src.supabase_data import (
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 OUTLOOK_FROM_EMAIL = "nadiaravindra07@outlook.com"
+LB_TO_KG = 0.45359237
 HANDLED_STATUSES = {
     "OVERRIDE_APPROVED",
     "DISPUTED",
@@ -70,6 +77,11 @@ def format_money(value: object) -> str:
     if number is None:
         return "N/A"
     return f"${number:,.2f}"
+
+
+def _format_aud_money(value: object) -> str:
+    number = format_money(value)
+    return f"{number} AUD" if number != "N/A" else number
 
 
 def _format_invoice_accuracy(
@@ -162,7 +174,7 @@ def format_weight(value: object) -> str:
     number = _numeric_value(value)
     if number is None:
         return "N/A"
-    return f"{number:,.0f} lb"
+    return f"{number * LB_TO_KG:,.0f} kg"
 
 
 def _money_delta(value: object) -> str:
@@ -179,14 +191,16 @@ def _weight_delta(value: object) -> str:
     if number is None:
         return "N/A"
     if number == 0:
-        return "0 lb"
-    return f"{number:+,.0f} lb"
+        return "0 kg"
+    return f"{number * LB_TO_KG:+,.0f} kg"
 
 
 def _primary_root_cause(row: pd.Series) -> str:
     duplicate_of = row.get("duplicate_of_invoice_id")
     if isinstance(duplicate_of, str) and duplicate_of.strip():
         return f"Duplicate bill — previously processed {duplicate_of}"
+    if row.get("root_cause") == UNAUTHORIZED_FUEL_CREEP:
+        return UNAUTHORIZED_FUEL_CREEP
     if not bool(row.get("receipt_found")):
         return "⚪ Missing Scale Receipt"
 
@@ -222,11 +236,11 @@ def _primary_root_cause(row: pd.Series) -> str:
             return f"🔴 Base + {fee_cause}"
         return f"🔴 Unapproved {code}"
 
-    if base_variance > 0 and fuel_variance > 0:
+    if base_variance > 0 and fuel_variance < 0:
         return "🟡 Base + Fuel Variance"
     if base_variance > 0:
         return "🔴 Base Rate Variance"
-    if fuel_variance > 0:
+    if fuel_variance < 0:
         return "🟡 Fuel Index Pegged"
     if (_numeric_value(row.get("weight_variance_lbs")) or 0.0) > 0:
         return "🔴 Weight Overweight"
@@ -294,21 +308,37 @@ def _comparison_table(row: pd.Series) -> pd.DataFrame:
     expected_weight = _numeric_value(
         row.get("contracted_expected_weight", row.get("expected_weight"))
     )
+    base_freight = _numeric_value(
+        row.get("contracted_base_rate", row.get("contracted_base_freight"))
+    )
+    shipment_date = row.get(
+        "fuel_shipment_date",
+        row.get("pickup_date", row.get("invoice_date", "")),
+    )
+    fuel_authorization = (
+        calculate_authorized_fuel(base_freight, str(shipment_date))
+        if base_freight is not None
+        else None
+    )
     result = [
         {
             "Component": "Base freight",
-            "Invoiced (Carrier)": format_money(row.get("billed_base_freight")),
-            "Authorized (PO)": format_money(
+            "Invoiced (Carrier)": _format_aud_money(row.get("billed_base_freight")),
+            "Authorized (PO)": _format_aud_money(
                 row.get("contracted_base_rate", row.get("contracted_base_freight"))
             ),
             "Physical (WMS)": "—",
             "Variance": _money_delta(row.get("base_variance")),
         },
         {
-            "Component": "Fuel surcharge",
-            "Invoiced (Carrier)": format_money(row.get("billed_fuel_surcharge")),
-            "Authorized (PO)": format_money(
-                row.get("contracted_fuel_surcharge", row.get("agreed_fuel_surcharge"))
+            "Component": "Fuel Surcharge (AIP Weekly Index)",
+            "Invoiced (Carrier)": _format_aud_money(
+                row.get("billed_fuel_surcharge")
+            ),
+            "Authorized (PO)": _format_aud_money(
+                fuel_authorization["authorized_amount"]
+                if fuel_authorization is not None
+                else row.get("authorized_fuel_surcharge")
             ),
             "Physical (WMS)": "—",
             "Variance": _money_delta(row.get("fuel_variance")),
@@ -340,8 +370,8 @@ def _comparison_table(row: pd.Series) -> pd.DataFrame:
             result.append(
                 {
                     "Component": f"Accessorial — {code or 'UNKNOWN'}: {item['description']}",
-                    "Invoiced (Carrier)": format_money(billed_amount),
-                    "Authorized (PO)": format_money(authorized_amount),
+                    "Invoiced (Carrier)": _format_aud_money(billed_amount),
+                    "Authorized (PO)": _format_aud_money(authorized_amount),
                     "Physical (WMS)": "—",
                     "Variance": _money_delta(billed_amount - authorized_amount),
                 }
@@ -350,8 +380,12 @@ def _comparison_table(row: pd.Series) -> pd.DataFrame:
         result.append(
             {
                 "Component": "Accessorial fees (legacy aggregate)",
-                "Invoiced (Carrier)": format_money(row.get("billed_accessorial_fee")),
-                "Authorized (PO)": format_money(row.get("max_accessorial_allowance")),
+                "Invoiced (Carrier)": _format_aud_money(
+                    row.get("billed_accessorial_fee")
+                ),
+                "Authorized (PO)": _format_aud_money(
+                    row.get("max_accessorial_allowance")
+                ),
                 "Physical (WMS)": "—",
                 "Variance": _money_delta(row.get("accessorial_variance")),
             }
@@ -364,7 +398,7 @@ def _comparison_table(row: pd.Series) -> pd.DataFrame:
     result.extend(
         [
             {
-                "Component": "├─ Gross Vehicle Wt",
+                "Component": "├─ Gross Vehicle Mass",
                 "Invoiced (Carrier)": "—",
                 "Authorized (PO)": "—",
                 "Physical (WMS)": format_weight(row.get("gross_weight_lbs")),
@@ -378,7 +412,7 @@ def _comparison_table(row: pd.Series) -> pd.DataFrame:
                 "Variance": "—",
             },
             {
-                "Component": "Chargeable / certified net weight",
+                "Component": "Chargeable / Certified Net Weight",
                 "Invoiced (Carrier)": format_weight(billed_weight),
                 "Authorized (PO)": format_weight(expected_weight),
                 "Physical (WMS)": format_weight(scale_weight),
@@ -387,6 +421,75 @@ def _comparison_table(row: pd.Series) -> pd.DataFrame:
         ]
     )
     return pd.DataFrame(result)
+
+
+def _render_fuel_audit_breakdown(row: pd.Series, fuel_tolerance: float) -> None:
+    base_freight = _numeric_value(
+        row.get("contracted_base_rate", row.get("contracted_base_freight"))
+    )
+    billed_fuel = _numeric_value(row.get("billed_fuel_surcharge"))
+    shipment_date = row.get(
+        "fuel_shipment_date",
+        row.get("pickup_date", row.get("invoice_date", "")),
+    )
+    if base_freight is None or billed_fuel is None:
+        st.warning("AIP fuel audit details are unavailable for this invoice.")
+        return
+
+    authorization = calculate_authorized_fuel(base_freight, str(shipment_date))
+    billed_pct = billed_fuel / base_freight if base_freight else 0.0
+    fuel_overcharge = max(0.0, billed_fuel - authorization["authorized_amount"])
+    parsed_date = pd.to_datetime(shipment_date, errors="coerce")
+    if pd.isna(parsed_date):
+        index_week_label = "Unlisted shipment week; default index applied"
+    else:
+        week_start = parsed_date - pd.Timedelta(days=parsed_date.weekday())
+        shipment_label = (
+            "Departure"
+            if row.get("fuel_shipment_date_source") == "pickup_date"
+            else "Invoice date fallback"
+        )
+        index_date = week_start.strftime("%Y-%m-%d")
+        default_label = (
+            "" if index_date in FUEL_INDEX_MAP else "; default index applied"
+        )
+        index_week_label = (
+            f"Week of {week_start.strftime('%d %b %Y')} "
+            f"({shipment_label}{default_label})"
+        )
+
+    with st.container(border=True):
+        st.markdown("#### AIP Diesel Fuel Surcharge Audit Breakdown")
+        details = st.columns([1.1, 1.1, 1.1, 1.5])
+        details[0].caption("AIP Weekly Diesel Price")
+        details[0].markdown(
+            f"**${authorization['index_price']:.2f} AUD / L**"
+        )
+        details[0].caption(index_week_label)
+        details[1].caption("Contract Base Peg")
+        details[1].markdown(f"**${BASE_PEG_PRICE:.2f} AUD / L**")
+        details[1].caption(
+            f"+{STEP_PERCENTAGE:.1%} surcharge per {STEP_INTERVAL * 100:.0f}¢ step"
+        )
+        details[2].caption("Authorized Fuel Surcharge")
+        details[2].markdown(f"**{authorization['allowed_pct']:.2%}**")
+        details[2].caption(
+            f"Steps: {authorization['steps']} | Calculated: "
+            f"{_format_aud_money(authorization['authorized_amount'])}"
+        )
+        details[3].markdown(
+            f"Billed: {billed_pct:.2%} "
+            f"({_format_aud_money(billed_fuel)})"
+        )
+        details[3].markdown(
+            f"Authorized: {authorization['allowed_pct']:.2%} "
+            f"({_format_aud_money(authorization['authorized_amount'])})"
+        )
+        discrepancy = _format_aud_money(-fuel_overcharge)
+        if fuel_overcharge > fuel_tolerance:
+            details[3].error(f"Discrepancy: {discrepancy}")
+        else:
+            details[3].caption(f"Discrepancy: {discrepancy}")
 
 
 def _save_resolution(
@@ -762,17 +865,21 @@ def render_audit() -> None:
                 ),
                 unsafe_allow_html=True,
             )
+            if selected.get("root_cause") == UNAUTHORIZED_FUEL_CREEP:
+                st.error("🔴 AIP Index Overcharge Detected")
+            _render_fuel_audit_breakdown(selected, fuel_tolerance)
             financial_summary = st.columns(3)
             financial_summary[0].metric(
-                "Total Invoiced Amount", format_money(selected.get("total_invoiced"))
+                "Total Invoiced Amount",
+                _format_aud_money(selected.get("total_invoiced")),
             )
             financial_summary[1].metric(
                 "Withheld / Disputed Amount",
-                f"-{format_money(selected.get('disputed_amount'))}",
+                f"-{_format_aud_money(selected.get('disputed_amount'))}",
             )
             financial_summary[2].metric(
                 "Net Approved Remittance",
-                format_money(selected.get("approved_remittance")),
+                _format_aud_money(selected.get("approved_remittance")),
             )
             rebuttal_sla = _rebuttal_sla(
                 selected.get("rebuttal_deadline"), selected.get("audit_status")

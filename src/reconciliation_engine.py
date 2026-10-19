@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import math
 from collections.abc import Mapping
+from datetime import date, timedelta
+from decimal import Decimal
 from pathlib import Path
 from numbers import Real
 from typing import Iterable
@@ -15,6 +17,58 @@ TOUCHLESS_APPROVED = "TOUCHLESS_APPROVED"
 REVIEW_REQUIRED = "REVIEW_REQUIRED"
 DISCREPANCY_FLAGGED = "DISCREPANCY_FLAGGED"
 REVIEW_INCOMPLETE = "REVIEW_INCOMPLETE"
+UNAUTHORIZED_FUEL_CREEP = "UNAUTHORIZED_FUEL_CREEP"
+
+FUEL_INDEX_MAP = {
+    "2026-10-05": 1.88,
+    "2026-10-12": 1.95,
+    "2026-10-19": 1.92,
+}
+BASE_PEG_PRICE = 1.50
+STEP_INTERVAL = 0.05
+STEP_PERCENTAGE = 0.005
+DEFAULT_FUEL_INDEX_PRICE = 1.95
+
+
+def _fuel_index_for_shipment_week(shipment_date: str) -> float:
+    try:
+        parsed_date = date.fromisoformat(str(shipment_date)[:10])
+    except ValueError:
+        return DEFAULT_FUEL_INDEX_PRICE
+    week_start = parsed_date - timedelta(days=parsed_date.weekday())
+    return FUEL_INDEX_MAP.get(week_start.isoformat(), DEFAULT_FUEL_INDEX_PRICE)
+
+
+def calculate_authorized_fuel(
+    base_freight: float, shipment_date: str
+) -> dict[str, float | int]:
+    """Calculate the contract fuel allowance from the published weekly AIP index."""
+    fuel_index_price = _fuel_index_for_shipment_week(shipment_date)
+    if fuel_index_price <= BASE_PEG_PRICE:
+        allowed_pct = 0.0
+        steps = 0
+    else:
+        steps = math.floor(
+            (Decimal(str(fuel_index_price)) - Decimal(str(BASE_PEG_PRICE)))
+            / Decimal(str(STEP_INTERVAL))
+        )
+        allowed_pct = steps * STEP_PERCENTAGE
+
+    return {
+        "index_price": fuel_index_price,
+        "base_peg": BASE_PEG_PRICE,
+        "steps": steps,
+        "allowed_pct": allowed_pct,
+        "authorized_amount": round(base_freight * allowed_pct, 2),
+    }
+
+
+def _shipment_date(row: pd.Series) -> tuple[object, str]:
+    pickup_date = row.get("pickup_date")
+    if pickup_date is not None and not pd.isna(pickup_date):
+        return pickup_date, "pickup_date"
+    return row.get("invoice_date", ""), "invoice_date"
+
 
 REQUIRED_COLUMNS = {
     "purchase_orders": {
@@ -284,7 +338,37 @@ def reconcile(
     merged["receipt_found"] = merged["receipt_match"].eq("both")
 
     merged["base_variance"] = merged["billed_base_freight"] - merged["contracted_base_freight"]
-    merged["fuel_variance"] = merged["billed_fuel_surcharge"] - merged["agreed_fuel_surcharge"]
+    shipment_dates = merged.apply(_shipment_date, axis=1)
+    merged["fuel_shipment_date"] = shipment_dates.map(lambda result: result[0])
+    merged["fuel_shipment_date_source"] = shipment_dates.map(
+        lambda result: result[1]
+    )
+    fuel_authorizations = merged.apply(
+        lambda row: calculate_authorized_fuel(
+            float(row["contracted_base_freight"]),
+            str(row["fuel_shipment_date"]),
+        ),
+        axis=1,
+    )
+    merged["fuel_index_price"] = fuel_authorizations.map(
+        lambda result: result["index_price"]
+    )
+    merged["fuel_base_peg"] = fuel_authorizations.map(
+        lambda result: result["base_peg"]
+    )
+    merged["fuel_steps"] = fuel_authorizations.map(lambda result: result["steps"])
+    merged["fuel_allowed_pct"] = fuel_authorizations.map(
+        lambda result: result["allowed_pct"]
+    )
+    merged["authorized_fuel_surcharge"] = fuel_authorizations.map(
+        lambda result: result["authorized_amount"]
+    )
+    merged["fuel_variance"] = (
+        merged["authorized_fuel_surcharge"] - merged["billed_fuel_surcharge"]
+    )
+    merged["fuel_overcharge"] = (
+        merged["billed_fuel_surcharge"] - merged["authorized_fuel_surcharge"]
+    ).clip(lower=0)
     accessorial_results = merged.apply(
         lambda row: _itemized_accessorial_variance(
             row.get("accessorial_items"),
@@ -297,7 +381,7 @@ def reconcile(
     merged["accessorial_variance"] = accessorial_results.map(lambda result: result[0])
     merged["unauthorized_accessorial_items"] = accessorial_results.map(lambda result: result[1])
     merged["total_overbill"] = (
-        merged["base_variance"] + merged["fuel_variance"] + merged["accessorial_variance"]
+        merged["base_variance"] - merged["fuel_variance"] + merged["accessorial_variance"]
     ).clip(lower=0)
     calculated_invoice_total = (
         merged["billed_base_freight"].fillna(0)
@@ -323,12 +407,12 @@ def reconcile(
     )
     merged["total_contracted_value"] = (
         merged["contracted_base_freight"]
-        + merged["agreed_fuel_surcharge"]
+        + merged["authorized_fuel_surcharge"]
         + merged["max_accessorial_allowance"]
     )
     merged["variance_pct"] = merged["total_overbill"].div(merged["total_contracted_value"]).fillna(0)
 
-    fuel_over_tolerance = (merged["fuel_variance"] - fuel_tolerance).clip(lower=0)
+    fuel_over_tolerance = (merged["fuel_overcharge"] - fuel_tolerance).clip(lower=0)
     tolerance_adjusted_overbill = (
         merged["base_variance"] + fuel_over_tolerance + merged["accessorial_variance"]
     ).clip(lower=0)
@@ -357,6 +441,10 @@ def reconcile(
         tolerance_adjusted_pct.gt(0.05) | merged["weight_variance_lbs"].gt(0),
         "status",
     ] = DISCREPANCY_FLAGGED
+    merged["root_cause"] = ""
+    fuel_over_tolerance_mask = merged["fuel_overcharge"].gt(fuel_tolerance)
+    merged.loc[fuel_over_tolerance_mask, "status"] = DISCREPANCY_FLAGGED
+    merged.loc[fuel_over_tolerance_mask, "root_cause"] = UNAUTHORIZED_FUEL_CREEP
     merged.loc[~merged["receipt_found"], "status"] = REVIEW_INCOMPLETE
     merged.loc[
         merged["duplicate_of_invoice_id"].notna(),
@@ -396,15 +484,27 @@ def summarize_carrier_billing(
     reconciled: pd.DataFrame,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Summarize exact billing accuracy by carrier and attribute net overbill."""
+    fuel_overcharge = (
+        pd.to_numeric(reconciled["fuel_overcharge"], errors="coerce")
+        if "fuel_overcharge" in reconciled
+        else pd.to_numeric(
+            reconciled["fuel_variance"], errors="coerce"
+        ).clip(lower=0)
+    )
     variance_columns = {
         "Base rate inflation": "base_variance",
-        "Fuel index slippage": "fuel_variance",
         "Accessorial creep": "accessorial_variance",
     }
     variances = reconciled[list(variance_columns.values())].apply(
         pd.to_numeric, errors="coerce"
     )
-    clean = variances.eq(0).all(axis=1)
+    variances["fuel_overcharge"] = fuel_overcharge
+    variance_columns["Fuel index slippage"] = "fuel_overcharge"
+    clean = (
+        reconciled["base_variance"].eq(0)
+        & reconciled["fuel_variance"].eq(0)
+        & reconciled["accessorial_variance"].eq(0)
+    )
     positive_variances = variances.fillna(0).clip(lower=0)
     positive_total = positive_variances.sum(axis=1)
     net_overbill = (
@@ -516,6 +616,19 @@ def write_discrepancy_queue(reconciled: pd.DataFrame, output_path: str | Path) -
                 "variance_pct": round(numeric(record.get("variance_pct")), 6),
                 "base_variance": round(numeric(record.get("base_variance")), 2),
                 "fuel_variance": round(numeric(record.get("fuel_variance")), 2),
+                "fuel_overcharge": round(numeric(record.get("fuel_overcharge")), 2),
+                "authorized_fuel_surcharge": round(
+                    numeric(record.get("authorized_fuel_surcharge")), 2
+                ),
+                "fuel_index_price": numeric(record.get("fuel_index_price")),
+                "fuel_base_peg": numeric(record.get("fuel_base_peg")),
+                "fuel_shipment_date": record.get("fuel_shipment_date"),
+                "fuel_shipment_date_source": record.get(
+                    "fuel_shipment_date_source"
+                ),
+                "fuel_steps": int(numeric(record.get("fuel_steps"))),
+                "fuel_allowed_pct": numeric(record.get("fuel_allowed_pct")),
+                "root_cause": record.get("root_cause") or "",
                 "accessorial_variance": round(numeric(record.get("accessorial_variance")), 2),
                 "unauthorized_accessorial_items": record.get(
                     "unauthorized_accessorial_items", []
