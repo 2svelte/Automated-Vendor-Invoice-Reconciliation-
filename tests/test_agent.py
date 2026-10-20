@@ -84,6 +84,74 @@ def test_prompt_requires_plain_text_without_markdown_bold_markers():
     assert "short-paid" in prompt
 
 
+def test_prompt_only_includes_positive_overcharge_line_items():
+    prompt = _prompt(
+        {
+            "invoice_number": "INV-1",
+            "po_number": "PO-1",
+            "total_invoiced": 195,
+            "disputed_variance": 5,
+            "disputed_amount": 5,
+            "approved_remittance": 190,
+            "base_variance": -5,
+            "fuel_variance": 5,
+            "overcharge_line_items": [
+                {
+                    "description": "Fuel surcharge",
+                    "amount": 5,
+                    "is_overcharge": True,
+                }
+            ],
+            "accessorial_items": [
+                {"description": "Liftgate", "amount": 95}
+            ],
+            "approved_accessorial_items": [
+                {"description": "Liftgate", "amount": 100}
+            ],
+        }
+    )
+
+    assert "Fuel surcharge" in prompt
+    assert "Liftgate" not in prompt
+    assert "Do not dispute underbilled or exact-match line items." in prompt
+
+
+def test_prompt_omits_underbilled_fuel_details():
+    prompt = _prompt(
+        {
+            "invoice_number": "INV-1",
+            "po_number": "PO-1",
+            "total_invoiced": 95,
+            "disputed_amount": 5,
+            "approved_remittance": 90,
+            "base_variance": 10,
+            "fuel_variance": -5,
+            "fuel_overcharge": 0,
+            "billed_fuel_surcharge": 95,
+            "authorized_fuel_surcharge": 100,
+        }
+    )
+
+    assert '"Fuel surcharge"' not in prompt
+    assert "billed_fuel_surcharge" not in prompt
+    assert "authorized_fuel_surcharge" not in prompt
+
+
+def test_fuel_within_tolerance_is_not_added_to_dispute_memo():
+    exception = {
+        "invoice_number": "INV-1",
+        "po_number": "PO-1",
+        "disputed_amount": 0,
+        "fuel_overcharge": 0.5,
+        "fuel_disputed_overcharge": 0,
+        "billed_fuel_surcharge": 45.5,
+        "authorized_fuel_surcharge": 45,
+        "fuel_index_price": 1.95,
+    }
+
+    assert fuel_dispute_line(exception) == ""
+
+
 def test_short_pay_statement_uses_itemized_unauthorized_accessorials():
     statement = short_pay_statement(
         {
@@ -105,6 +173,26 @@ def test_short_pay_statement_uses_itemized_unauthorized_accessorials():
         "variance ($430.00) and fuel surcharge variance ($20.00) and unauthorized "
         "driver detention ($90.00)."
     )
+
+
+def test_short_pay_statement_does_not_list_underbilled_components():
+    statement = short_pay_statement(
+        {
+            "po_number": "PO-1",
+            "total_invoiced": 95,
+            "disputed_variance": 0,
+            "disputed_amount": 0,
+            "approved_remittance": 95,
+            "base_variance": -5,
+            "fuel_variance": 0,
+            "accessorial_variance": -5,
+            "unauthorized_accessorial_items": [],
+        }
+    )
+
+    assert "base rate credit" not in statement
+    assert "accessorial" not in statement
+    assert "no disputed overcharge" in statement
 
 
 def test_fuel_dispute_line_uses_verified_aip_values():

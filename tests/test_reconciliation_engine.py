@@ -5,6 +5,7 @@ from src.reconciliation_engine import (
     DISCREPANCY_FLAGGED,
     FUEL_INDEX_MAP,
     REVIEW_INCOMPLETE,
+    REVIEW_REQUIRED,
     TOUCHLESS_APPROVED,
     UNAUTHORIZED_FUEL_CREEP,
     calculate_authorized_fuel,
@@ -38,6 +39,57 @@ def test_clean_three_way_match_is_touchless():
     result = reconcile(*sources())
     assert result.loc[0, "status"] == TOUCHLESS_APPROVED
     assert result.loc[0, "total_overbill"] == 0
+
+
+def test_base_underbill_is_favorable_and_not_queued(tmp_path):
+    po, invoice, receipts = sources()
+    po.loc[0, "contracted_base_freight"] = 100
+    invoice.loc[0, "billed_base_freight"] = 95
+    invoice.loc[0, "billed_fuel_surcharge"] = 0
+    invoice.loc[0, "billed_accessorial_fee"] = 0
+
+    result = reconcile(po, invoice, receipts)
+
+    assert result.loc[0, "base_variance"] == -5
+    assert result.loc[0, "total_overbill"] == 0
+    assert result.loc[0, "disputed_amount"] == 0
+    assert result.loc[0, "total_invoiced"] == 95
+    assert result.loc[0, "approved_remittance"] == 95
+    assert result.loc[0, "status"] == TOUCHLESS_APPROVED
+    assert write_discrepancy_queue(result, tmp_path / "queue.json") == []
+
+
+def test_underbill_does_not_offset_a_different_line_item_overcharge():
+    po, invoice, receipts = sources()
+    po.loc[0, "contracted_base_freight"] = 1000
+    po["approved_accessorial_items"] = [[
+        {"code": "LFT", "description": "Liftgate", "amount": 100}
+    ]]
+    invoice.loc[0, "billed_base_freight"] = 1000
+    invoice.loc[0, "billed_fuel_surcharge"] = 50
+    invoice.loc[0, "billed_accessorial_fee"] = 95
+    invoice["accessorial_items"] = [[
+        {"code": "LFT", "description": "Liftgate", "amount": 95}
+    ]]
+
+    result = reconcile(po, invoice, receipts)
+
+    assert result.loc[0, "base_variance"] == 0
+    assert result.loc[0, "fuel_variance"] == 5
+    assert result.loc[0, "accessorial_variance"] == -5
+    assert result.loc[0, "disputed_variance"] == 5
+    assert result.loc[0, "disputed_amount"] == 5
+    assert result.loc[0, "total_invoiced"] == 1145
+    assert result.loc[0, "approved_remittance"] == 1140
+    assert result.loc[0, "unauthorized_accessorial_items"] == []
+    assert result.loc[0, "status"] == DISCREPANCY_FLAGGED
+    assert result.loc[0, "overcharge_line_items"] == [
+        {
+            "description": "Fuel surcharge",
+            "amount": 5.0,
+            "is_overcharge": True,
+        }
+    ]
 
 
 def test_aip_fuel_calculation_uses_weekly_index_and_decimal_steps():
@@ -96,7 +148,7 @@ def test_aip_fuel_overcharge_drives_signed_variance_remittance_and_queue(tmp_pat
     queue = write_discrepancy_queue(result, tmp_path / "queue.json")
 
     assert result.loc[0, "authorized_fuel_surcharge"] == 123.75
-    assert result.loc[0, "fuel_variance"] == pytest.approx(-161.25)
+    assert result.loc[0, "fuel_variance"] == pytest.approx(161.25)
     assert result.loc[0, "status"] == DISCREPANCY_FLAGGED
     assert result.loc[0, "root_cause"] == UNAUTHORIZED_FUEL_CREEP
     assert result.loc[0, "disputed_amount"] == pytest.approx(681.25)
@@ -108,19 +160,39 @@ def test_weight_tolerance_is_two_percent():
     within = reconcile(*sources(receipt_weight=1000, billed_weight=1020))
     over = reconcile(*sources(receipt_weight=1000, billed_weight=1021))
     assert within.loc[0, "status"] == TOUCHLESS_APPROVED
-    assert over.loc[0, "status"] == DISCREPANCY_FLAGGED
+    assert over.loc[0, "status"] == REVIEW_REQUIRED
     assert over.loc[0, "weight_variance_lbs"] == pytest.approx(1)
 
 
-def test_configured_fuel_tolerance_changes_status_not_audited_variance():
+def test_fuel_overcharge_within_tolerance_is_approved_without_withholding():
     po, invoice, receipts = sources()
     invoice["billed_fuel_surcharge"] = 45.5
 
-    result = reconcile(po, invoice, receipts, fuel_tolerance=1.0)
+    result = reconcile(po, invoice, receipts)
 
-    assert result.loc[0, "fuel_variance"] == pytest.approx(-0.5)
-    assert result.loc[0, "total_overbill"] == pytest.approx(0.5)
+    assert result.loc[0, "fuel_variance"] == pytest.approx(0.5)
+    assert result.loc[0, "fuel_overcharge"] == pytest.approx(0.5)
+    assert result.loc[0, "fuel_disputed_overcharge"] == 0
+    assert result.loc[0, "disputed_variance"] == 0
+    assert result.loc[0, "disputed_amount"] == 0
+    assert result.loc[0, "approved_remittance"] == result.loc[0, "total_invoiced"]
     assert result.loc[0, "status"] == TOUCHLESS_APPROVED
+
+
+def test_fuel_tolerance_boundary_passes_and_above_boundary_flags():
+    po, invoice, receipts = sources()
+    invoice["billed_fuel_surcharge"] = 46
+
+    within = reconcile(po, invoice, receipts, fuel_tolerance=1.0)
+    above = reconcile(po, invoice, receipts, fuel_tolerance=0.99)
+
+    assert within.loc[0, "fuel_variance"] == pytest.approx(1.0)
+    assert within.loc[0, "status"] == TOUCHLESS_APPROVED
+    assert within.loc[0, "disputed_amount"] == 0
+    assert within.loc[0, "fuel_disputed_overcharge"] == 0
+    assert above.loc[0, "status"] == DISCREPANCY_FLAGGED
+    assert above.loc[0, "disputed_amount"] == pytest.approx(1.0)
+    assert above.loc[0, "fuel_disputed_overcharge"] == pytest.approx(1.0)
 
 
 def test_configured_weight_buffer_controls_flag_threshold():
@@ -148,7 +220,7 @@ def test_overbill_math_and_flag_threshold():
     invoice.loc[0, "billed_fuel_surcharge"] = 180
     invoice.loc[0, "billed_accessorial_fee"] = 100
     result = reconcile(po, invoice, receipts)
-    assert result.loc[0, "fuel_variance"] == -135
+    assert result.loc[0, "fuel_variance"] == 135
     assert result.loc[0, "fuel_overcharge"] == 135
     assert result.loc[0, "accessorial_variance"] == 50
     assert result.loc[0, "total_overbill"] == 185
@@ -162,9 +234,9 @@ def test_short_pay_amounts_use_invoice_total_and_disputed_overbill():
 
     result = reconcile(po, invoice, receipts)
 
-    assert result.loc[0, "total_invoiced"] == 1260
+    assert result.loc[0, "total_invoiced"] == 1195
     assert result.loc[0, "disputed_amount"] == 100
-    assert result.loc[0, "approved_remittance"] == 1160
+    assert result.loc[0, "approved_remittance"] == 1095
 
 
 def test_duplicate_invoice_number_blocks_later_invoice_and_identifies_original():
@@ -217,6 +289,7 @@ def test_itemized_accessorials_flag_unapproved_code_and_amount(tmp_path):
     result = reconcile(po, invoice, receipts)
 
     assert result.loc[0, "accessorial_variance"] == 90
+    assert result.loc[0, "accessorial_overcharge"] == 90
     assert result.loc[0, "unauthorized_accessorial_items"] == [{
         "code": "DET",
         "description": "Driver Detention",
@@ -279,7 +352,7 @@ def test_carrier_billing_summary_uses_reconciled_variances_and_nets_offsets():
                 "base_variance": 10,
                 "fuel_variance": -5,
                 "accessorial_variance": 5,
-                "total_overbill": 10,
+                "total_overbill": 15,
             },
         ]
     )
@@ -291,11 +364,11 @@ def test_carrier_billing_summary_uses_reconciled_variances_and_nets_offsets():
     assert northstar["Clean invoices"] == 1
     assert northstar["Accuracy index"] == pytest.approx(0.5)
     assert northstar["Primary leakage driver"] == "Base rate inflation"
-    assert leakage_summary["Amount"].sum() == pytest.approx(80)
+    assert leakage_summary["Amount"].sum() == pytest.approx(85)
     assert leakage_summary["Share"].sum() == pytest.approx(1)
     atlas_leakage = leakage_summary.set_index("Leakage category")["Amount"]
-    assert atlas_leakage["Base rate inflation"] == pytest.approx(60 + 10 * (10 / 15))
-    assert atlas_leakage["Accessorial creep"] == pytest.approx(5 * (10 / 15))
+    assert atlas_leakage["Base rate inflation"] == pytest.approx(60 + 10)
+    assert atlas_leakage["Accessorial creep"] == pytest.approx(5)
 
 
 def test_discrepancy_queue_writes_power_automate_contract(tmp_path):

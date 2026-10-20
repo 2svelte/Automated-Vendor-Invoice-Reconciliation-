@@ -159,7 +159,7 @@ def _itemized_accessorial_variance(
     approved_value: object,
     billed_total: object,
     approved_total: object,
-) -> tuple[float, list[dict[str, object]]]:
+) -> tuple[float, list[dict[str, object]], float]:
     billed_items = _accessorial_items(billed_value)
     approved_items = _accessorial_items(approved_value)
     legacy_allowance = pd.to_numeric(approved_total, errors="coerce")
@@ -172,8 +172,9 @@ def _itemized_accessorial_variance(
         billed = pd.to_numeric(billed_total, errors="coerce")
         allowance = legacy_allowance if pd.notna(legacy_allowance) else 0.0
         if pd.isna(billed):
-            return float("nan"), []
-        return max(0.0, float(billed) - float(allowance)), []
+            return float("nan"), [], 0.0
+        variance = float(billed) - float(allowance)
+        return variance, [], max(0.0, variance)
 
     approved_by_code: dict[str, float] = {}
     for item in approved_items:
@@ -200,6 +201,8 @@ def _itemized_accessorial_variance(
         line["billed_amount"] = float(line["billed_amount"]) + float(amount)
 
     unauthorized: list[dict[str, object]] = []
+    total_billed = sum(float(line["billed_amount"]) for line in billed_by_code.values())
+    total_authorized = sum(approved_by_code.values())
     for code, line in billed_by_code.items():
         authorized_amount = approved_by_code.get(code, 0.0)
         billed_amount = float(line["billed_amount"])
@@ -212,7 +215,8 @@ def _itemized_accessorial_variance(
                     "overage": overage,
                 }
             )
-    return sum(float(item["overage"]) for item in unauthorized), unauthorized
+    overcharge = sum(float(item["overage"]) for item in unauthorized)
+    return total_billed - total_authorized, unauthorized, overcharge
 
 
 def _validate_inputs(frames: dict[str, pd.DataFrame]) -> None:
@@ -364,10 +368,10 @@ def reconcile(
         lambda result: result["authorized_amount"]
     )
     merged["fuel_variance"] = (
-        merged["authorized_fuel_surcharge"] - merged["billed_fuel_surcharge"]
+        merged["billed_fuel_surcharge"] - merged["authorized_fuel_surcharge"]
     )
     merged["fuel_overcharge"] = (
-        merged["billed_fuel_surcharge"] - merged["authorized_fuel_surcharge"]
+        merged["fuel_variance"]
     ).clip(lower=0)
     accessorial_results = merged.apply(
         lambda row: _itemized_accessorial_variance(
@@ -379,26 +383,88 @@ def reconcile(
         axis=1,
     )
     merged["accessorial_variance"] = accessorial_results.map(lambda result: result[0])
-    merged["unauthorized_accessorial_items"] = accessorial_results.map(lambda result: result[1])
-    merged["total_overbill"] = (
-        merged["base_variance"] - merged["fuel_variance"] + merged["accessorial_variance"]
-    ).clip(lower=0)
+    merged["unauthorized_accessorial_items"] = accessorial_results.map(
+        lambda result: result[1]
+    )
+    merged["accessorial_overcharge"] = accessorial_results.map(
+        lambda result: result[2]
+    )
+    merged["base_overcharge"] = merged["base_variance"].clip(lower=0)
+    merged["overcharge_line_items"] = merged.apply(
+        lambda row: [
+            *(
+                [
+                    {
+                        "description": "Base freight",
+                        "amount": float(row["base_overcharge"]),
+                        "is_overcharge": True,
+                    }
+                ]
+                if row["base_overcharge"] > 0
+                else []
+            ),
+            *(
+                [
+                    {
+                        "description": "Fuel surcharge",
+                        "amount": float(row["fuel_overcharge"]),
+                        "is_overcharge": True,
+                    }
+                ]
+                if row["fuel_overcharge"] > fuel_tolerance
+                else []
+            ),
+            *[
+                {
+                    "description": (
+                        item.get("description")
+                        or item.get("code")
+                        or "Accessorial"
+                    ),
+                    "amount": float(item["overage"]),
+                    "is_overcharge": True,
+                }
+                for item in row["unauthorized_accessorial_items"]
+            ],
+            *(
+                [
+                    {
+                        "description": "Accessorial fees",
+                        "amount": float(row["accessorial_overcharge"]),
+                        "is_overcharge": True,
+                    }
+                ]
+                if row["accessorial_overcharge"] > 0
+                and not row["unauthorized_accessorial_items"]
+                else []
+            ),
+        ],
+        axis=1,
+    )
+    merged["disputed_variance"] = merged["overcharge_line_items"].map(
+        lambda line_items: sum(
+            float(item["amount"])
+            for item in line_items
+            if item["is_overcharge"] is True
+        )
+    )
+    merged["total_overbill"] = merged["disputed_variance"]
+
+    def billed_accessorial_total(row: pd.Series) -> float:
+        items = _accessorial_items(row.get("accessorial_items"))
+        if items:
+            return sum(float(item["amount"]) for item in items)
+        return pd.to_numeric(row.get("billed_accessorial_fee"), errors="coerce")
+
+    billed_accessorial_totals = merged.apply(billed_accessorial_total, axis=1)
     calculated_invoice_total = (
         merged["billed_base_freight"].fillna(0)
         + merged["billed_fuel_surcharge"].fillna(0)
-        + merged["billed_accessorial_fee"].fillna(0)
+        + billed_accessorial_totals.fillna(0)
     )
-    if "invoice_total_due" in merged:
-        supplied_invoice_total = pd.to_numeric(
-            merged["invoice_total_due"], errors="coerce"
-        )
-        merged["total_invoiced"] = supplied_invoice_total.fillna(
-            calculated_invoice_total
-        )
-    else:
-        merged["total_invoiced"] = calculated_invoice_total
+    merged["total_invoiced"] = calculated_invoice_total
     merged["disputed_amount"] = (
-        pd.to_numeric(merged["total_overbill"], errors="coerce")
+        pd.to_numeric(merged["disputed_variance"], errors="coerce")
         .fillna(0)
         .clip(lower=0)
     )
@@ -410,14 +476,10 @@ def reconcile(
         + merged["authorized_fuel_surcharge"]
         + merged["max_accessorial_allowance"]
     )
-    merged["variance_pct"] = merged["total_overbill"].div(merged["total_contracted_value"]).fillna(0)
-
-    fuel_over_tolerance = (merged["fuel_overcharge"] - fuel_tolerance).clip(lower=0)
-    tolerance_adjusted_overbill = (
-        merged["base_variance"] + fuel_over_tolerance + merged["accessorial_variance"]
-    ).clip(lower=0)
-    tolerance_adjusted_pct = (
-        tolerance_adjusted_overbill.div(merged["total_contracted_value"]).fillna(0)
+    merged["variance_pct"] = (
+        merged["disputed_variance"]
+        .div(merged["total_contracted_value"])
+        .fillna(0)
     )
     merged["weight_variance_lbs"] = (
         merged["billed_weight_lbs"]
@@ -432,19 +494,18 @@ def reconcile(
 
     merged["status"] = REVIEW_REQUIRED
     merged.loc[
-        tolerance_adjusted_pct.le(0.01)
+        merged["disputed_variance"].eq(0)
         & merged["receipt_found"]
         & merged["weight_check_passed"],
         "status",
     ] = TOUCHLESS_APPROVED
-    merged.loc[
-        tolerance_adjusted_pct.gt(0.05) | merged["weight_variance_lbs"].gt(0),
-        "status",
-    ] = DISCREPANCY_FLAGGED
+    merged.loc[merged["disputed_variance"].gt(0), "status"] = DISCREPANCY_FLAGGED
     merged["root_cause"] = ""
-    fuel_over_tolerance_mask = merged["fuel_overcharge"].gt(fuel_tolerance)
-    merged.loc[fuel_over_tolerance_mask, "status"] = DISCREPANCY_FLAGGED
-    merged.loc[fuel_over_tolerance_mask, "root_cause"] = UNAUTHORIZED_FUEL_CREEP
+    fuel_exception_mask = merged["fuel_overcharge"].gt(fuel_tolerance)
+    merged.loc[fuel_exception_mask, "root_cause"] = UNAUTHORIZED_FUEL_CREEP
+    merged["fuel_disputed_overcharge"] = merged["fuel_overcharge"].where(
+        fuel_exception_mask, 0
+    )
     merged.loc[~merged["receipt_found"], "status"] = REVIEW_INCOMPLETE
     merged.loc[
         merged["duplicate_of_invoice_id"].notna(),
@@ -483,17 +544,26 @@ def summarize(reconciled: pd.DataFrame) -> dict[str, float | int]:
 def summarize_carrier_billing(
     reconciled: pd.DataFrame,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Summarize exact billing accuracy by carrier and attribute net overbill."""
+    """Summarize exact billing accuracy by carrier and attribute overcharges."""
+    fuel_overcharge_column = (
+        "fuel_disputed_overcharge"
+        if "fuel_disputed_overcharge" in reconciled
+        else "fuel_overcharge"
+    )
     fuel_overcharge = (
-        pd.to_numeric(reconciled["fuel_overcharge"], errors="coerce")
-        if "fuel_overcharge" in reconciled
-        else pd.to_numeric(
-            reconciled["fuel_variance"], errors="coerce"
-        ).clip(lower=0)
+        pd.to_numeric(reconciled[fuel_overcharge_column], errors="coerce")
+        if fuel_overcharge_column in reconciled
+        else pd.to_numeric(reconciled["fuel_variance"], errors="coerce").clip(
+            lower=0
+        )
     )
     variance_columns = {
         "Base rate inflation": "base_variance",
-        "Accessorial creep": "accessorial_variance",
+        "Accessorial creep": (
+            "accessorial_overcharge"
+            if "accessorial_overcharge" in reconciled
+            else "accessorial_variance"
+        ),
     }
     variances = reconciled[list(variance_columns.values())].apply(
         pd.to_numeric, errors="coerce"
@@ -504,6 +574,11 @@ def summarize_carrier_billing(
         reconciled["base_variance"].eq(0)
         & reconciled["fuel_variance"].eq(0)
         & reconciled["accessorial_variance"].eq(0)
+        & (
+            reconciled["disputed_variance"].eq(0)
+            if "disputed_variance" in reconciled
+            else True
+        )
     )
     positive_variances = variances.fillna(0).clip(lower=0)
     positive_total = positive_variances.sum(axis=1)
@@ -608,6 +683,18 @@ def write_discrepancy_queue(reconciled: pd.DataFrame, output_path: str | Path) -
                 "carrier_name": record.get("carrier_name"),
                 "status": record.get("status"),
                 "total_overbill": round(numeric(record.get("total_overbill")), 2),
+                "disputed_variance": round(
+                    numeric(record.get("disputed_variance")), 2
+                ),
+                "base_overcharge": round(numeric(record.get("base_overcharge")), 2),
+                "fuel_overcharge": round(numeric(record.get("fuel_overcharge")), 2),
+                "fuel_disputed_overcharge": round(
+                    numeric(record.get("fuel_disputed_overcharge")), 2
+                ),
+                "accessorial_overcharge": round(
+                    numeric(record.get("accessorial_overcharge")), 2
+                ),
+                "overcharge_line_items": record.get("overcharge_line_items", []),
                 "total_invoiced": round(numeric(record.get("total_invoiced")), 2),
                 "disputed_amount": round(numeric(record.get("disputed_amount")), 2),
                 "approved_remittance": round(
@@ -616,7 +703,6 @@ def write_discrepancy_queue(reconciled: pd.DataFrame, output_path: str | Path) -
                 "variance_pct": round(numeric(record.get("variance_pct")), 6),
                 "base_variance": round(numeric(record.get("base_variance")), 2),
                 "fuel_variance": round(numeric(record.get("fuel_variance")), 2),
-                "fuel_overcharge": round(numeric(record.get("fuel_overcharge")), 2),
                 "authorized_fuel_surcharge": round(
                     numeric(record.get("authorized_fuel_surcharge")), 2
                 ),

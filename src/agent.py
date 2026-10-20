@@ -32,7 +32,106 @@ def _load_company_profile() -> dict[str, Any]:
 
 
 def _prompt(exception: dict[str, Any]) -> str:
-    facts = json.dumps(exception, default=str, sort_keys=True)
+    def amount(value: object) -> float:
+        try:
+            parsed = float(str(value))
+        except (TypeError, ValueError):
+            return 0.0
+        return parsed if math.isfinite(parsed) else 0.0
+
+    supplied_line_items = exception.get("overcharge_line_items")
+    if isinstance(supplied_line_items, list):
+        line_items = [
+            item
+            for item in supplied_line_items
+            if isinstance(item, dict)
+            and item.get("is_overcharge") is True
+            and amount(item.get("amount")) > 0
+        ]
+    else:
+        line_items = []
+        for description, key in (
+            ("Base freight", "base_overcharge"),
+            ("Fuel surcharge", "fuel_overcharge"),
+        ):
+            value = amount(exception.get(key))
+            if value <= 0:
+                variance_key = (
+                    "base_variance" if key == "base_overcharge" else "fuel_variance"
+                )
+                value = max(0.0, amount(exception.get(variance_key)))
+            if value > 0:
+                line_items.append({"description": description, "amount": value})
+        unauthorized_items = exception.get("unauthorized_accessorial_items")
+        accessorial_count = 0
+        if isinstance(unauthorized_items, list):
+            for item in unauthorized_items:
+                if not isinstance(item, dict) or amount(item.get("overage")) <= 0:
+                    continue
+                line_items.append(
+                    {
+                        "description": str(
+                            item.get("description")
+                            or item.get("code")
+                            or "Accessorial"
+                        ),
+                        "amount": amount(item.get("overage")),
+                    }
+                )
+                accessorial_count += 1
+        accessorial_overcharge = amount(
+            exception.get(
+                "accessorial_overcharge", exception.get("accessorial_variance")
+            )
+        )
+        if accessorial_count == 0 and accessorial_overcharge > 0:
+            line_items.append(
+                {
+                    "description": "Accessorial",
+                    "amount": accessorial_overcharge,
+                }
+            )
+
+    fact_keys = (
+        "invoice_number",
+        "po_number",
+        "carrier_name",
+        "total_invoiced",
+        "disputed_variance",
+        "disputed_amount",
+        "approved_remittance",
+        "root_cause",
+        "fuel_disputed_overcharge",
+    )
+    facts = {
+        key: exception[key]
+        for key in fact_keys
+        if key in exception
+    }
+    fuel_overcharge = amount(
+        exception.get(
+            "fuel_disputed_overcharge",
+            exception.get(
+                "fuel_overcharge", max(0.0, amount(exception.get("fuel_variance")))
+            ),
+        )
+    )
+    if fuel_overcharge > 0:
+        facts.update(
+            {
+                key: exception[key]
+                for key in (
+                    "fuel_overcharge",
+                    "billed_fuel_surcharge",
+                    "authorized_fuel_surcharge",
+                    "fuel_index_price",
+                    "fuel_base_peg",
+                )
+                if key in exception
+            }
+        )
+    facts["overcharge_line_items"] = line_items
+    facts = json.dumps(facts, default=str, sort_keys=True)
     company_profile = json.dumps(_load_company_profile(), ensure_ascii=False, sort_keys=True)
     return f"""Draft a concise, professional carrier dispute letter using only these verified reconciliation facts:
 {facts}
@@ -42,7 +141,8 @@ Use this company profile document as the authoritative source for the sender's s
 
 Requirements:
 - Reference the invoice and PO.
-- Identify each supplied line-item variance and the total overbill.
+- Identify only the supplied positive overcharge line items and total withheld amount.
+- Do not dispute underbilled or exact-match line items.
 - Explicitly state the approved remittance and the amount short-paid.
 - Use the term "short-paid" and say the approved remittance is queued for payment.
 - Request a credit memo or supporting contractual documentation.
@@ -73,16 +173,14 @@ def short_pay_statement(exception: dict[str, Any]) -> str:
     fuel_variance = amount(exception.get("fuel_variance"))
     if base_variance > 0:
         reasons.append(f"base rate variance (${base_variance:,.2f})")
-    elif base_variance < 0:
-        reasons.append(f"base rate credit (-${abs(base_variance):,.2f})")
     fuel_overcharge = amount(
-        exception.get("fuel_overcharge", max(0.0, fuel_variance))
+        exception.get(
+            "fuel_disputed_overcharge",
+            exception.get("fuel_overcharge", max(0.0, fuel_variance)),
+        )
     )
     if fuel_overcharge > 0:
         reasons.append(f"fuel surcharge variance (${fuel_overcharge:,.2f})")
-    elif fuel_variance < 0 and "fuel_overcharge" not in exception:
-        reasons.append(f"fuel surcharge credit (-${abs(fuel_variance):,.2f})")
-
     unauthorized_items = exception.get("unauthorized_accessorial_items")
     if isinstance(unauthorized_items, list) and unauthorized_items:
         for item in unauthorized_items:
@@ -114,7 +212,11 @@ def short_pay_statement(exception: dict[str, Any]) -> str:
 def fuel_dispute_line(exception: dict[str, Any]) -> str:
     """Render the verified AIP fuel overcharge as a deterministic memo line."""
     try:
-        overcharge = float(exception.get("fuel_overcharge", 0))
+        overcharge = float(
+            exception.get(
+                "fuel_disputed_overcharge", exception.get("fuel_overcharge", 0)
+            )
+        )
         billed = float(exception.get("billed_fuel_surcharge", 0))
         authorized = float(exception.get("authorized_fuel_surcharge", 0))
         index_price = float(exception.get("fuel_index_price", 0))

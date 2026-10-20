@@ -55,3 +55,26 @@ def test_evidence_packet_is_one_page_and_contains_dispute_and_source_evidence():
         "Two cartons crushed",
     ):
         assert evidence in text
+
+
+def test_evidence_packet_excludes_underbilled_line_items():
+    packet = generate_dispute_packet_pdf(
+        {
+            "invoice_number": "INV-1",
+            "total_invoiced": 95,
+            "disputed_amount": 0,
+            "approved_remittance": 95,
+            "base_variance": -5,
+            "fuel_variance": 0,
+            "accessorial_variance": -5,
+            "unauthorized_accessorial_items": [],
+        },
+        "No disputed overcharge.",
+    )
+
+    with pdfplumber.open(BytesIO(packet)) as pdf:
+        text = pdf.pages[0].extract_text() or ""
+
+    assert "Base rate" not in text
+    assert "Fuel surcharge" not in text
+    assert "Accessorial variance" not in text

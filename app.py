@@ -17,7 +17,6 @@ from src.dispute_packet import generate_dispute_packet_pdf
 from src.reconciliation_engine import (
     BASE_PEG_PRICE,
     DISCREPANCY_FLAGGED,
-    FUEL_INDEX_MAP,
     REVIEW_INCOMPLETE,
     REVIEW_REQUIRED,
     STEP_INTERVAL,
@@ -50,13 +49,18 @@ HANDLED_STATUSES = {
     "CLOSED_OVERRIDDEN",
 }
 AUDIT_STATUS_LABELS = {
-    "OVERRIDE_APPROVED": "Override approved",
+    TOUCHLESS_APPROVED: "Touchless Approved",
+    REVIEW_REQUIRED: "Review Required",
+    DISCREPANCY_FLAGGED: "Discrepancy Flagged",
+    REVIEW_INCOMPLETE: "Review Incomplete",
+    "DUPLICATE_BILLING_BLOCKED": "Duplicate Billing Blocked",
+    "OVERRIDE_APPROVED": "Override Approved",
     "DISPUTED": "Disputed",
-    "SCALE_TICKET_REQUESTED": "Scale ticket requested",
-    "UNDER_REVIEW": "Under review",
-    "REBUTTAL_RECEIVED": "REBUTTAL_RECEIVED (Carrier rebuttal received)",
-    "CLOSED_RESOLVED": "CLOSED_RESOLVED (Credit Memo Issued)",
-    "CLOSED_OVERRIDDEN": "CLOSED_OVERRIDDEN (Dispute Conceded)",
+    "SCALE_TICKET_REQUESTED": "Scale Ticket Requested",
+    "UNDER_REVIEW": "Under Review",
+    "REBUTTAL_RECEIVED": "Rebuttal Received",
+    "CLOSED_RESOLVED": "Closed Resolved",
+    "CLOSED_OVERRIDDEN": "Closed Overridden",
 }
 
 
@@ -84,19 +88,17 @@ def _format_aud_money(value: object) -> str:
     return f"{number} AUD" if number != "N/A" else number
 
 
+def _format_withheld_amount(value: object) -> str:
+    number = _numeric_value(value)
+    if number is None:
+        return "N/A"
+    return f"${max(0.0, number):,.2f} AUD"
+
+
 def _format_invoice_accuracy(
     accuracy: float, clean_invoices: int, invoice_count: int
 ) -> str:
-    if accuracy >= 1:
-        indicator = "🟢"
-    elif accuracy >= 0.5:
-        indicator = "🟡"
-    else:
-        indicator = "🔴"
-    return (
-        f"{indicator} {accuracy:.0%} "
-        f"({clean_invoices} / {invoice_count} Clean)"
-    )
+    return f"{accuracy:.0%} ({clean_invoices} / {invoice_count} Clean)"
 
 
 def _dispute_memo_button_label(has_generated: bool) -> str:
@@ -186,6 +188,19 @@ def _money_delta(value: object) -> str:
     return f"{'+' if number > 0 else '-'}${abs(number):,.2f}"
 
 
+def _format_billing_variance(billed: object, authorized: object) -> str:
+    billed_amount = _numeric_value(billed)
+    authorized_amount = _numeric_value(authorized)
+    if billed_amount is None or authorized_amount is None:
+        return "N/A"
+    variance = billed_amount - authorized_amount
+    if variance > 0:
+        return f"+${variance:,.2f}"
+    if variance < 0:
+        return f"-${abs(variance):,.2f}"
+    return "$0.00"
+
+
 def _weight_delta(value: object) -> str:
     number = _numeric_value(value)
     if number is None:
@@ -200,51 +215,47 @@ def _primary_root_cause(row: pd.Series) -> str:
     if isinstance(duplicate_of, str) and duplicate_of.strip():
         return f"Duplicate bill — previously processed {duplicate_of}"
     if row.get("root_cause") == UNAUTHORIZED_FUEL_CREEP:
-        return UNAUTHORIZED_FUEL_CREEP
+        return "Unauthorized Fuel Creep"
     if not bool(row.get("receipt_found")):
-        return "⚪ Missing Scale Receipt"
+        return "Missing Scale Receipt"
 
     base_variance = _numeric_value(row.get("base_variance")) or 0.0
     fuel_variance = _numeric_value(row.get("fuel_variance")) or 0.0
     unauthorized_items = row.get("unauthorized_accessorial_items", [])
-    accessorial_codes = sorted(
+    accessorial_descriptions = sorted(
         {
-            str(item.get("code") or "UNKNOWN").strip().upper()
+            str(item.get("description") or item.get("code") or "Accessorial")
+            .strip()
+            .title()
             for item in unauthorized_items
             if isinstance(item, dict)
         }
     ) if isinstance(unauthorized_items, list) else []
 
-    if accessorial_codes:
-        if len(accessorial_codes) > 1:
-            return f"🔴 Unapproved {' & '.join(accessorial_codes)}"
-        code = accessorial_codes[0]
-        matching_item = next(
-            (
-                item
-                for item in unauthorized_items
-                if isinstance(item, dict)
-                and str(item.get("code") or "UNKNOWN").strip().upper() == code
-            ),
-            {},
-        )
-        description = str(matching_item.get("description") or "").strip()
-        if description.startswith("Driver "):
-            description = description.removeprefix("Driver ")
-        fee_cause = f"{description} ({code})" if description else code
+    if accessorial_descriptions:
+        accessorial_cause = ", ".join(accessorial_descriptions)
         if base_variance > 0:
-            return f"🔴 Base + {fee_cause}"
-        return f"🔴 Unapproved {code}"
+            return f"Base + {accessorial_cause}"
+        if len(accessorial_descriptions) > 1:
+            return f"Unapproved Accessorials: {accessorial_cause}"
+        return f"Unapproved {accessorial_cause}"
 
-    if base_variance > 0 and fuel_variance < 0:
-        return "🟡 Base + Fuel Variance"
+    if base_variance > 0 and fuel_variance > 0:
+        return "Base + Fuel Variance"
     if base_variance > 0:
-        return "🔴 Base Rate Variance"
-    if fuel_variance < 0:
-        return "🟡 Fuel Index Pegged"
+        return "Base Rate Variance"
+    if fuel_variance > 0:
+        return "Fuel Index Pegged"
     if (_numeric_value(row.get("weight_variance_lbs")) or 0.0) > 0:
-        return "🔴 Weight Overweight"
-    return "🟡 Review Required"
+        return "Weight Overweight"
+    return "Review Required"
+
+
+def _display_status(status: object) -> str:
+    value = str(status)
+    return AUDIT_STATUS_LABELS.get(
+        value, value.replace("_", " ").strip().title()
+    )
 
 
 def _workbench_table_html(
@@ -252,50 +263,294 @@ def _workbench_table_html(
     *,
     table_class: str,
     column_widths: list[int],
+    column_groups: dict[str, list[str]] | None = None,
 ) -> str:
-    header = "".join(
-        f'<th scope="col" style="width:{width}%">{escape(str(column))}</th>'
-        for column, width in zip(frame.columns, column_widths, strict=True)
+    columns = list(zip(frame.columns, column_widths, strict=True))
+    column_groups = column_groups or {}
+    group_by_first_column = {
+        members[0]: (label, len(members))
+        for label, members in column_groups.items()
+    }
+    grouped_columns = {
+        column for members in column_groups.values() for column in members
+    }
+
+    def header_cell(index: int, column: object, attributes: str = "") -> str:
+        return (
+            f'<th scope="col"{attributes}>{escape(str(column))}'
+            + (
+                f'<span class="column-resizer" data-column-index="{index}" '
+                f'role="separator" tabindex="0" aria-orientation="vertical" '
+                f'aria-label="Resize {escape(str(column))} column"></span>'
+                if index < len(columns) - 1
+                else ""
+            )
+            + "</th>"
+        )
+
+    if column_groups:
+        top_cells = []
+        sub_cells = []
+        for index, (column, _) in enumerate(columns):
+            if column in group_by_first_column:
+                label, span = group_by_first_column[column]
+                top_cells.append(
+                    f'<th scope="colgroup" colspan="{span}" '
+                    f'class="column-group">{escape(label)}</th>'
+                )
+            if column in grouped_columns:
+                sub_cells.append(header_cell(index, column))
+            else:
+                top_cells.append(header_cell(index, column, ' rowspan="2"'))
+        header = (
+            f"<tr>{''.join(top_cells)}</tr><tr>{''.join(sub_cells)}</tr>"
+        )
+    else:
+        header = "<tr>" + "".join(
+            header_cell(index, column)
+            for index, (column, _) in enumerate(columns)
+        ) + "</tr>"
+    colgroup = "".join(
+        f'<col style="width:{width}%">' for _, width in columns
     )
     rows = []
     for _, row in frame.iterrows():
+        component = str(row.get("Component", ""))
+        if component in {
+            "Financial Line Items (Charges)",
+            "Physical Scale / Weight Verification (Compliance & Billing Basis)",
+        }:
+            rows.append(
+                '<tr class="table-tier-heading">'
+                f'<td colspan="{len(columns)}">{escape(component)}</td>'
+                "</tr>"
+            )
+            continue
+
         cells = []
         status = str(row.get("Status", ""))
+        status_code = next(
+            (
+                code
+                for code, label in AUDIT_STATUS_LABELS.items()
+                if label == status
+            ),
+            status,
+        )
         for column, value in row.items():
             text = str(value)
             classes = []
             if column == "Status":
                 classes.append("status-cell")
-                if status == DISCREPANCY_FLAGGED:
-                    classes.append("status-flagged")
-                elif status == "DUPLICATE_BILLING_BLOCKED":
-                    classes.append("status-duplicate")
-                elif status == REVIEW_REQUIRED:
-                    classes.append("status-review")
-                elif status == REVIEW_INCOMPLETE:
-                    classes.append("status-incomplete")
-                elif status == TOUCHLESS_APPROVED:
-                    classes.append("status-approved")
+            elif column == "Primary Root Cause":
+                classes.append("root-cause-cell")
             elif column == "Receipt":
-                classes.append("receipt-found" if text == "Found" else "receipt-missing")
-            elif column == "Discrepancy (Total Δ)" and status == DISCREPANCY_FLAGGED:
+                if text == "Missing":
+                    classes.append("receipt-missing")
+            elif column == "Total" and status_code == DISCREPANCY_FLAGGED:
                 classes.append("discrepancy-flagged")
-            elif column == "Duplicate Match" and text != "—":
-                classes.extend(["discrepancy-flagged", "duplicate-match"])
-            elif column == "Variance" and (
-                text.startswith("+") or "Overweight" in text
-            ):
-                classes.append("variance-flagged")
+            elif column == "Variance" and text.startswith("+"):
+                if str(row.get("Component", "")) == "Fuel Surcharge (AIP Weekly Index)":
+                    classes.append("variance-fuel-overcharge")
+                else:
+                    classes.append("variance-flagged")
+            elif column == "Variance" and text.startswith("-"):
+                classes.append("variance-credit")
+            elif column == "Variance" and text == "$0.00":
+                classes.append("variance-neutral")
             class_attribute = f' class="{" ".join(classes)}"' if classes else ""
             escaped_text = escape(text)
+            is_fuel_variance = (
+                column == "Variance"
+                and str(row.get("Component", ""))
+                == "Fuel Surcharge (AIP Weekly Index)"
+            )
+            cell_content = (
+                f'<span class="variance-overcharge-badge">{escaped_text}</span>'
+                if column == "Variance" and text.startswith("+") and not is_fuel_variance
+                else escaped_text
+            )
             cells.append(
-                f"<td{class_attribute} title=\"{escaped_text}\">{escaped_text}</td>"
+                f"<td{class_attribute} title=\"{escaped_text}\">{cell_content}</td>"
             )
         rows.append(f"<tr>{''.join(cells)}</tr>")
     return (
-        f'<div class="workbench-table-wrap"><table class="workbench-table {table_class}">'
-        f"<thead><tr>{header}</tr></thead><tbody>{''.join(rows)}</tbody></table></div>"
+        """<!doctype html>
+        <html>
+        <head>
+          <style>
+            html, body { margin: 0; padding: 0; background: transparent; }
+            .workbench-table-wrap {
+              width: 100%; overflow-x: auto; margin-bottom: 0.375rem;
+            }
+            table.workbench-table {
+              width: 100%; table-layout: fixed; border-collapse: collapse;
+              font: 16px/1.4 "Source Sans Pro", sans-serif;
+            }
+            table.worklist-table { min-width: 1180px; }
+            table.reconciliation-table { min-width: 560px; }
+            table.workbench-table th, table.workbench-table td {
+              box-sizing: border-box; border: 1px solid #34383f;
+              padding: 3px 6px; text-align: left; white-space: nowrap;
+              overflow: hidden; text-overflow: ellipsis;
+            }
+            table.workbench-table th {
+              position: relative; padding-right: 12px; background: #15191f;
+              color: #f1f3f5; font-weight: 600; white-space: normal;
+            }
+            table.workbench-table th.column-group {
+              text-align: center; padding-right: 6px;
+            }
+            table.workbench-table td { background: #0e1117; color: #f1f3f5; }
+            table.workbench-table .status-cell,
+            table.workbench-table .root-cause-cell {
+              color: #fff; font-family: inherit; font-size: 16px;
+              font-weight: 400;
+            }
+            table.workbench-table .status-cell { text-align: left; }
+            table.workbench-table .root-cause-cell { text-align: left; }
+            table.workbench-table .receipt-missing {
+              color: #fff; text-align: left; font-size: 14px;
+              font-weight: 600;
+            }
+            table.workbench-table tr.table-tier-heading td {
+              padding: 7px 8px; background: #202833; color: #d8e5f4;
+              font-weight: 700; text-align: left; white-space: normal;
+            }
+            .column-resizer {
+              position: absolute; z-index: 1; top: 0; right: -3px; bottom: 0;
+              width: 8px; cursor: col-resize; touch-action: none;
+              user-select: none;
+            }
+            .column-resizer:hover, .column-resizer:focus-visible {
+              background: #60a5fa; outline: none;
+            }
+            table.workbench-table .receipt-missing { background: #c63b40; }
+            table.workbench-table .discrepancy-flagged {
+              background: #dc454b; color: #fff;               font-weight: 700; text-align: left;
+            }
+            table.workbench-table .variance-flagged {
+              color: #fff; text-align: right;
+            }
+            table.workbench-table .variance-fuel-overcharge {
+              color: #e46b6b; font-weight: 600; text-align: right;
+            }
+            .variance-overcharge-badge {
+              display: inline-block; padding: 1px 6px; border-radius: 4px;
+              background: #c63b40; color: #fff; font-weight: 700;
+            }
+            table.workbench-table .variance-credit {
+              color: #34d399; font-weight: 600; text-align: right;
+            }
+            table.workbench-table .variance-neutral {
+              color: #aab2bd; text-align: right;
+            }
+            table.reconciliation-table td:not(:first-child) { text-align: right; }
+            table.reconciliation-table td:first-child { white-space: normal; }
+          </style>
+        </head>
+        <body>
+        """
+        + f'<div class="workbench-table-wrap"><table class="workbench-table '
+        + f'{escape(table_class)}" data-table-key="{escape(table_class)}">'
+        + f"<colgroup>{colgroup}</colgroup>"
+        + f"<thead>{header}</thead><tbody>{''.join(rows)}</tbody>"
+        + """</table></div>
+        <script>
+          const table = document.querySelector("table.workbench-table");
+          const columns = Array.from(table.querySelectorAll("col"));
+          const handles = Array.from(table.querySelectorAll(".column-resizer"));
+          const storageKey = `freight-table-widths:${table.dataset.tableKey}`;
+          const minimumColumnWidth = 56;
+
+          function applyWidths(widths) {
+            if (!Array.isArray(widths) || widths.length !== columns.length ||
+                widths.some(width => !Number.isFinite(width) || width <= 0)) {
+              return false;
+            }
+            const total = widths.reduce((sum, width) => sum + width, 0);
+            columns.forEach((column, index) => {
+              column.style.width = `${widths[index] / total * 100}%`;
+            });
+            return true;
+          }
+
+          try {
+            const savedWidths = JSON.parse(localStorage.getItem(storageKey));
+            if (savedWidths !== null) applyWidths(savedWidths);
+          } catch (error) {
+            console.error("Could not restore saved table column widths.", error);
+          }
+
+          function saveWidths() {
+            const widths = columns.map(column =>
+              column.getBoundingClientRect().width
+            );
+            try {
+              localStorage.setItem(storageKey, JSON.stringify(widths));
+            } catch (error) {
+              console.error("Could not save table column widths.", error);
+            }
+          }
+
+          function resizeColumn(index, requestedDelta) {
+            const tableWidth = table.getBoundingClientRect().width;
+            const leftWidth = columns[index].getBoundingClientRect().width;
+            const rightWidth = columns[index + 1].getBoundingClientRect().width;
+            const delta = Math.max(
+              minimumColumnWidth - leftWidth,
+              Math.min(requestedDelta, rightWidth - minimumColumnWidth)
+            );
+            columns[index].style.width = `${(leftWidth + delta) / tableWidth * 100}%`;
+            columns[index + 1].style.width =
+              `${(rightWidth - delta) / tableWidth * 100}%`;
+          }
+
+          handles.forEach(handle => {
+            const index = Number(handle.dataset.columnIndex);
+            handle.addEventListener("pointerdown", event => {
+              event.preventDefault();
+              handle.focus();
+              const startX = event.clientX;
+              const tableWidth = table.getBoundingClientRect().width;
+              const leftWidth = columns[index].getBoundingClientRect().width;
+              const rightWidth = columns[index + 1].getBoundingClientRect().width;
+              const minimumDelta = minimumColumnWidth - leftWidth;
+              const maximumDelta = rightWidth - minimumColumnWidth;
+              const move = moveEvent => {
+                const delta = Math.max(
+                  minimumDelta,
+                  Math.min(moveEvent.clientX - startX, maximumDelta)
+                );
+                columns[index].style.width =
+                  `${(leftWidth + delta) / tableWidth * 100}%`;
+                columns[index + 1].style.width =
+                  `${(rightWidth - delta) / tableWidth * 100}%`;
+              };
+              const finish = () => {
+                window.removeEventListener("pointermove", move);
+                window.removeEventListener("pointerup", finish);
+                saveWidths();
+              };
+              window.addEventListener("pointermove", move);
+              window.addEventListener("pointerup", finish, { once: true });
+            });
+            handle.addEventListener("keydown", event => {
+              if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+              event.preventDefault();
+              resizeColumn(index, event.key === "ArrowLeft" ? -12 : 12);
+              saveWidths();
+            });
+          });
+        </script>
+        </body>
+        </html>
+        """
     )
+
+
+def _table_component_height(row_count: int, header_rows: int = 1) -> int:
+    return max(96, (row_count + header_rows) * 32 + 6)
 
 
 def _comparison_table(row: pd.Series) -> pd.DataFrame:
@@ -322,13 +577,23 @@ def _comparison_table(row: pd.Series) -> pd.DataFrame:
     )
     result = [
         {
+            "Component": "Financial Line Items (Charges)",
+            "Invoiced (Carrier)": "",
+            "Authorized (PO)": "",
+            "Physical (WMS)": "",
+            "Variance": "",
+        },
+        {
             "Component": "Base freight",
             "Invoiced (Carrier)": _format_aud_money(row.get("billed_base_freight")),
             "Authorized (PO)": _format_aud_money(
                 row.get("contracted_base_rate", row.get("contracted_base_freight"))
             ),
             "Physical (WMS)": "—",
-            "Variance": _money_delta(row.get("base_variance")),
+            "Variance": _format_billing_variance(
+                row.get("billed_base_freight"),
+                row.get("contracted_base_rate", row.get("contracted_base_freight")),
+            ),
         },
         {
             "Component": "Fuel Surcharge (AIP Weekly Index)",
@@ -341,10 +606,24 @@ def _comparison_table(row: pd.Series) -> pd.DataFrame:
                 else row.get("authorized_fuel_surcharge")
             ),
             "Physical (WMS)": "—",
-            "Variance": _money_delta(row.get("fuel_variance")),
+            "Variance": _format_billing_variance(
+                row.get("billed_fuel_surcharge"),
+                fuel_authorization["authorized_amount"]
+                if fuel_authorization is not None
+                else row.get("authorized_fuel_surcharge"),
+            ),
         },
     ]
 
+    result.append(
+        {
+            "Component": "Accessorials",
+            "Invoiced (Carrier)": "",
+            "Authorized (PO)": "",
+            "Physical (WMS)": "",
+            "Variance": "",
+        }
+    )
     billed_items = row.get("accessorial_items", [])
     approved_items = row.get("approved_accessorial_items", [])
     if isinstance(billed_items, list) and billed_items:
@@ -369,17 +648,22 @@ def _comparison_table(row: pd.Series) -> pd.DataFrame:
             authorized_amount = approved_by_code.get(code, 0.0)
             result.append(
                 {
-                    "Component": f"Accessorial — {code or 'UNKNOWN'}: {item['description']}",
+                    "Component": (
+                        f"\u00a0\u00a0• {code or 'UNKNOWN'}: "
+                        f"{item['description']}"
+                    ),
                     "Invoiced (Carrier)": _format_aud_money(billed_amount),
                     "Authorized (PO)": _format_aud_money(authorized_amount),
                     "Physical (WMS)": "—",
-                    "Variance": _money_delta(billed_amount - authorized_amount),
+                    "Variance": _format_billing_variance(
+                        billed_amount, authorized_amount
+                    ),
                 }
             )
     else:
         result.append(
             {
-                "Component": "Accessorial fees (legacy aggregate)",
+                "Component": "\u00a0\u00a0• Accessorial fees (legacy aggregate)",
                 "Invoiced (Carrier)": _format_aud_money(
                     row.get("billed_accessorial_fee")
                 ),
@@ -387,7 +671,10 @@ def _comparison_table(row: pd.Series) -> pd.DataFrame:
                     row.get("max_accessorial_allowance")
                 ),
                 "Physical (WMS)": "—",
-                "Variance": _money_delta(row.get("accessorial_variance")),
+                "Variance": _format_billing_variance(
+                    row.get("billed_accessorial_fee"),
+                    row.get("max_accessorial_allowance"),
+                ),
             }
         )
 
@@ -398,32 +685,44 @@ def _comparison_table(row: pd.Series) -> pd.DataFrame:
     result.extend(
         [
             {
-                "Component": "├─ Gross Vehicle Mass",
+                "Component": (
+                    "Physical Scale / Weight Verification "
+                    "(Compliance & Billing Basis)"
+                ),
+                "Invoiced (Carrier)": "",
+                "Authorized (PO)": "",
+                "Physical (WMS)": "",
+                "Variance": "",
+            },
+            {
+                "Component": "Certified Net Chargeable Weight",
+                "Invoiced (Carrier)": format_weight(billed_weight),
+                "Authorized (PO)": format_weight(expected_weight),
+                "Physical (WMS)": format_weight(scale_weight),
+                "Variance": weight_variance_label,
+            },
+            {
+                "Component": "\u00a0\u00a0• Gross Vehicle Mass (GVM)",
                 "Invoiced (Carrier)": "—",
                 "Authorized (PO)": "—",
                 "Physical (WMS)": format_weight(row.get("gross_weight_lbs")),
                 "Variance": "—",
             },
             {
-                "Component": "└─ Empty truck + trailer tare weight",
+                "Component": "\u00a0\u00a0• Empty Truck + Trailer Tare Weight",
                 "Invoiced (Carrier)": "—",
                 "Authorized (PO)": "—",
                 "Physical (WMS)": format_weight(row.get("tare_weight_lbs")),
                 "Variance": "—",
-            },
-            {
-                "Component": "Chargeable / Certified Net Weight",
-                "Invoiced (Carrier)": format_weight(billed_weight),
-                "Authorized (PO)": format_weight(expected_weight),
-                "Physical (WMS)": format_weight(scale_weight),
-                "Variance": weight_variance_label,
             },
         ]
     )
     return pd.DataFrame(result)
 
 
-def _render_fuel_audit_breakdown(row: pd.Series, fuel_tolerance: float) -> None:
+def _render_fuel_audit_breakdown(
+    row: pd.Series, fuel_tolerance: float
+) -> None:
     base_freight = _numeric_value(
         row.get("contracted_base_rate", row.get("contracted_base_freight"))
     )
@@ -440,23 +739,12 @@ def _render_fuel_audit_breakdown(row: pd.Series, fuel_tolerance: float) -> None:
     billed_pct = billed_fuel / base_freight if base_freight else 0.0
     fuel_overcharge = max(0.0, billed_fuel - authorization["authorized_amount"])
     parsed_date = pd.to_datetime(shipment_date, errors="coerce")
-    if pd.isna(parsed_date):
-        index_week_label = "Unlisted shipment week; default index applied"
-    else:
-        week_start = parsed_date - pd.Timedelta(days=parsed_date.weekday())
-        shipment_label = (
-            "Departure"
-            if row.get("fuel_shipment_date_source") == "pickup_date"
-            else "Invoice date fallback"
-        )
-        index_date = week_start.strftime("%Y-%m-%d")
-        default_label = (
-            "" if index_date in FUEL_INDEX_MAP else "; default index applied"
-        )
-        index_week_label = (
-            f"Week of {week_start.strftime('%d %b %Y')} "
-            f"({shipment_label}{default_label})"
-        )
+    week_start = parsed_date - pd.Timedelta(days=parsed_date.weekday())
+    index_week_label = (
+        f"Week of {week_start.strftime('%d %b %Y')}"
+        if not pd.isna(parsed_date)
+        else "Shipment week unavailable"
+    )
 
     with st.container(border=True):
         st.markdown("#### AIP Diesel Fuel Surcharge Audit Breakdown")
@@ -473,10 +761,7 @@ def _render_fuel_audit_breakdown(row: pd.Series, fuel_tolerance: float) -> None:
         )
         details[2].caption("Authorized Fuel Surcharge")
         details[2].markdown(f"**{authorization['allowed_pct']:.2%}**")
-        details[2].caption(
-            f"Steps: {authorization['steps']} | Calculated: "
-            f"{_format_aud_money(authorization['authorized_amount'])}"
-        )
+        details[2].caption(f"Steps: {authorization['steps']}")
         details[3].markdown(
             f"Billed: {billed_pct:.2%} "
             f"({_format_aud_money(billed_fuel)})"
@@ -485,11 +770,19 @@ def _render_fuel_audit_breakdown(row: pd.Series, fuel_tolerance: float) -> None:
             f"Authorized: {authorization['allowed_pct']:.2%} "
             f"({_format_aud_money(authorization['authorized_amount'])})"
         )
-        discrepancy = _format_aud_money(-fuel_overcharge)
+        discrepancy = _format_billing_variance(
+            billed_fuel, authorization["authorized_amount"]
+        )
         if fuel_overcharge > fuel_tolerance:
-            details[3].error(f"Discrepancy: {discrepancy}")
+            details[3].error(f"Overcharge: {discrepancy} AUD")
+        elif fuel_overcharge > 0:
+            details[3].caption(
+                f"Within AIP fuel tolerance: {discrepancy} AUD"
+            )
+        elif billed_fuel < authorization["authorized_amount"]:
+            details[3].caption(f"Favorable savings: {discrepancy} AUD")
         else:
-            details[3].caption(f"Discrepancy: {discrepancy}")
+            details[3].caption(f"Variance: {discrepancy} AUD")
 
 
 def _save_resolution(
@@ -531,83 +824,32 @@ st.markdown(
     [data-testid="stMarkdownContainer"] h4 {
         font-size: 16px !important;
     }
-    .workbench-table-wrap {
-        width: 100%;
-        overflow-x: auto;
-        margin-bottom: 0.75rem;
+    [data-testid="stSidebar"] [data-testid="stSlider"] [data-orientation="horizontal"] > [data-rac] > [data-rac] {
+        background-color: #1e3a8a !important;
     }
-    table.worklist-table {
-        min-width: 1180px;
+    [data-testid="stSidebar"] [data-testid="stSlider"] [data-orientation="horizontal"] > [data-rac] > div:first-child {
+        filter: hue-rotate(240deg) brightness(0.55) !important;
     }
-    table.workbench-table {
-        width: 100%;
-        table-layout: fixed;
-        border-collapse: collapse;
-        font-size: 16px;
-        line-height: 1.4;
+    [data-testid="stSidebar"] [data-testid="stSlider"] [data-testid="stSliderThumbValue"] {
+        background: transparent !important;
+        border: 0 !important;
+        color: #f1f3f5 !important;
     }
-    table.workbench-table th,
-    table.workbench-table td {
-        border: 1px solid #34383f;
-        padding: 3px 2px;
-        text-align: left;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
+    [data-testid="stSidebar"] [data-testid="stSlider"] [data-testid="stSliderThumbValue"] p {
+        color: #f1f3f5 !important;
     }
-    table.workbench-table th {
-        background: #15191f;
-        color: #f1f3f5;
-        font-weight: 600;
-        white-space: normal;
+    .st-key-worklist_view [data-testid="stRadioOption"][data-selected="true"] > div > div:first-child,
+    .st-key-exception_filter [data-testid="stRadioOption"][data-selected="true"] > div > div:first-child {
+        background-color: #1e3a8a !important;
+        border-color: #1e3a8a !important;
     }
-    table.workbench-table td {
-        background: #0e1117;
+    .st-key-carrier_selection [data-testid="stMultiSelect"] [data-tag] {
+        background-color: #1e3a8a !important;
+        border-color: #1e3a8a !important;
     }
-    table.workbench-table .status-cell,
-    table.workbench-table .receipt-found,
-    table.workbench-table .receipt-missing {
-        color: #fff;
-        text-align: center;
-        font-size: 14px;
-        font-weight: 600;
-    }
-    table.workbench-table .status-flagged,
-    table.workbench-table .status-duplicate,
-    table.workbench-table .receipt-missing {
-        background: #c63b40;
-    }
-    table.workbench-table .status-duplicate,
-    table.workbench-table .duplicate-match {
-        white-space: normal;
-        overflow-wrap: anywhere;
-    }
-    table.workbench-table .status-review {
-        background: #b58800;
-    }
-    table.workbench-table .status-incomplete {
-        background: #c66a16;
-    }
-    table.workbench-table .status-approved,
-    table.workbench-table .receipt-found {
-        background: #18834b;
-    }
-    table.workbench-table .discrepancy-flagged {
-        background: #dc454b;
-        color: #fff;
-        font-weight: 700;
-        text-align: right;
-    }
-    table.workbench-table .variance-flagged {
-        color: #e46b6b;
-        font-weight: 600;
-        text-align: right;
-    }
-    table.reconciliation-table td:not(:first-child) {
-        text-align: right;
-    }
-    table.reconciliation-table td:first-child {
-        white-space: normal;
+    .st-key-carrier_selection [data-testid="stMultiSelect"] [role="group"][data-rac]:focus-within {
+        border-color: #1e3a8a !important;
+        box-shadow: 0 0 0 1px #1e3a8a !important;
     }
     </style>
     """,
@@ -617,12 +859,15 @@ st.markdown(
 with st.sidebar:
     st.subheader("Audit controls")
     fuel_tolerance = st.slider(
-        "Fuel tolerance ($)",
+        "AIP Fuel Tolerance ($ AUD)",
         min_value=0.0,
         max_value=25.0,
         value=1.0,
         step=0.5,
-        help="Fuel variance within this dollar amount does not trigger an exception.",
+        help=(
+            "Defines allowable rounding tolerance against the deterministic "
+            "AIP benchmark formula before triggering an overcharge exception."
+        ),
     )
     weight_tolerance_pct = st.slider(
         "Weight buffer (%)",
@@ -768,7 +1013,9 @@ def render_audit() -> None:
 
     with st.container(horizontal=True):
         carriers = sorted(audited["carrier_name"].dropna().astype(str).unique())
-        selected_carriers = st.multiselect("Carrier", carriers, default=carriers)
+        selected_carriers = st.multiselect(
+            "Carrier", carriers, default=carriers, key="carrier_selection"
+        )
         invoice_search = st.text_input("Invoice ID", placeholder="Filter invoices")
 
     visible = visible[visible["carrier_name"].astype("string").isin(selected_carriers)]
@@ -799,40 +1046,31 @@ def render_audit() -> None:
                 "Invoice ID": visible["invoice_number"],
                 "Carrier": visible["carrier_name"],
                 "PO Number": visible["po_number"],
-                "Status": visible["status"].map(
-                    lambda status: AUDIT_STATUS_LABELS.get(status, status)
-                ),
+                "Status": visible["status"].map(_display_status),
                 "Primary Root Cause": visible.apply(_primary_root_cause, axis=1),
-                "Duplicate Match": visible["duplicate_of_invoice_id"].map(
-                    lambda original: (
-                        f"Duplicate bill of previously processed {original}"
-                        if isinstance(original, str) and original.strip()
-                        else "—"
-                    )
-                ),
-                "Base Δ": visible["base_variance"].map(_money_delta),
-                "Fuel Δ": visible["fuel_variance"].map(_money_delta),
-                "Acc Δ": visible["accessorial_variance"].map(_money_delta),
-                "Wt Δ": visible["weight_variance_lbs"].map(_weight_delta),
-                "Discrepancy (Total Δ)": visible["total_overbill"].map(format_money),
-                "Rebuttal Window (SLA)": visible.apply(
-                    lambda row: _rebuttal_sla(
-                        row.get("rebuttal_deadline"), row.get("audit_status")
-                    ),
-                    axis=1,
-                ),
+                "Base": visible["base_variance"].map(_money_delta),
+                "Fuel": visible["fuel_variance"].map(_money_delta),
+                "Accessorials": visible["accessorial_variance"].map(_money_delta),
+                "Weight": visible["weight_variance_lbs"].map(_weight_delta),
+                "Total": visible["total_overbill"].map(format_money),
                 "Receipt": visible["receipt_found"].map(
                     lambda found: "Found" if bool(found) else "Missing"
                 ),
             }
         )
-        st.markdown(
+        components.html(
             _workbench_table_html(
                 display,
                 table_class="worklist-table",
-                column_widths=[6, 8, 6, 11, 14, 14, 5, 5, 5, 5, 8, 8, 5],
+                column_widths=[8, 10, 8, 13, 17, 8, 8, 11, 8, 10, 10],
+                column_groups={
+                    "Discrepancies": [
+                        "Base", "Fuel", "Accessorials", "Weight", "Total"
+                    ]
+                },
             ),
-            unsafe_allow_html=True,
+            height=_table_component_height(len(display), header_rows=2),
+            scrolling=False,
         )
 
         invoice_labels = {
@@ -857,25 +1095,31 @@ def render_audit() -> None:
                 st.warning("No warehouse receipt was found for this purchase order.")
             st.markdown("#### 3-Way Reconciliation")
             comparison = _comparison_table(selected)
-            st.markdown(
+            components.html(
                 _workbench_table_html(
                     comparison,
                     table_class="reconciliation-table",
                     column_widths=[29, 18, 18, 18, 17],
                 ),
-                unsafe_allow_html=True,
+                height=_table_component_height(len(comparison)),
+                scrolling=False,
             )
             if selected.get("root_cause") == UNAUTHORIZED_FUEL_CREEP:
-                st.error("🔴 AIP Index Overcharge Detected")
+                st.error("AIP Index Overcharge Detected")
             _render_fuel_audit_breakdown(selected, fuel_tolerance)
             financial_summary = st.columns(3)
             financial_summary[0].metric(
                 "Total Invoiced Amount",
                 _format_aud_money(selected.get("total_invoiced")),
             )
-            financial_summary[1].metric(
-                "Withheld / Disputed Amount",
-                f"-{_format_aud_money(selected.get('disputed_amount'))}",
+            withheld = _numeric_value(selected.get("disputed_amount")) or 0.0
+            financial_summary[1].markdown(
+                "<div>"
+                "<div style=\"font-family:inherit;font-size:20px;"
+                "color:#fafafa;font-weight:400\">Deductions Withheld</div>"
+                f"<div style=\"font-size:1.75rem;font-weight:600;"
+                f"color:#e46b6b\">{_format_withheld_amount(withheld)}</div></div>",
+                unsafe_allow_html=True,
             )
             financial_summary[2].metric(
                 "Net Approved Remittance",
@@ -1114,7 +1358,7 @@ def render_audit() -> None:
                             else:
                                 st.session_state[composer_key] = False
                                 st.session_state["dispatch_success_message"] = (
-                                    "🚀 Dispute logged! Outbound dispatch queued for "
+                                    "Dispute logged! Outbound dispatch queued for "
                                     "Power Automate Desktop to process via Outlook."
                                 )
                                 st.rerun()

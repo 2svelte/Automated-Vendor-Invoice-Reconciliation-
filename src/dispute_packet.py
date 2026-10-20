@@ -50,12 +50,22 @@ def _paragraph(value: object, style: ParagraphStyle) -> Paragraph:
 def _line_items(invoice: Mapping[str, object]) -> list[list[object]]:
     rows: list[list[object]] = [["Disputed line item", "Line-item variance"]]
     for label, key in (
-        ("Base rate variance", "base_variance"),
-        ("Fuel surcharge variance", "fuel_variance"),
+        ("Base rate overcharge", "base_overcharge"),
+        ("Fuel surcharge overcharge", "fuel_overcharge"),
     ):
-        value = _number(invoice.get(key)) or 0
-        if value != 0:
-            rows.append([label, _money(value) if value > 0 else f"-{_money(abs(value))}"])
+        fallback_key = (
+            "base_variance" if key == "base_overcharge" else "fuel_variance"
+        )
+        value_key = (
+            "fuel_disputed_overcharge"
+            if key == "fuel_overcharge"
+            else key
+        )
+        value = _number(invoice.get(value_key))
+        if value is None:
+            value = max(0, _number(invoice.get(fallback_key)) or 0)
+        if value > 0:
+            rows.append([label, _money(value)])
 
     items = invoice.get("unauthorized_accessorial_items")
     if isinstance(items, list) and items:
@@ -67,9 +77,13 @@ def _line_items(invoice: Mapping[str, object]) -> list[list[object]]:
                 description = item.get("description") or item.get("code") or "Accessorial"
                 rows.append([f"Unauthorized {description}", _money(overage)])
     else:
-        accessorial_variance = _number(invoice.get("accessorial_variance")) or 0
-        if accessorial_variance > 0:
-            rows.append(["Accessorial variance", _money(accessorial_variance)])
+        accessorial_overcharge = _number(invoice.get("accessorial_overcharge"))
+        if accessorial_overcharge is None:
+            accessorial_overcharge = max(
+                0, _number(invoice.get("accessorial_variance")) or 0
+            )
+        if accessorial_overcharge > 0:
+            rows.append(["Accessorial overcharge", _money(accessorial_overcharge)])
     if len(rows) == 1:
         rows.append(["No positive line-item variance recorded", "$0.00"])
     return rows

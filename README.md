@@ -33,7 +33,7 @@ The dashboard refreshes the three-way reconciliation every 15 seconds. For each 
 
 The current demo's `carrier_email` value is your Gmail address, so dispatches go to your Gmail inbox—not to freight companies—until you replace each value with the matching carrier's verified address. Outlook can generally send email to Gmail recipients, but your Microsoft 365 tenant's external-recipient policy may restrict it. Power Automate must be authorized to send as `nadiaravindra07@outlook.com`; the From value is not a way to bypass Outlook permissions.
 
-Fuel tolerance and weight buffer are adjustable in the Streamlit sidebar. The displayed overbill remains the full calculated amount; fuel tolerance affects exception classification only. Itemized invoice accessorials are compared by code and amount with `purchase_orders.approved_accessorial_items`; unauthorized codes or amounts appear as actionable findings (for example, an unapproved `DET` detention charge). Migrated legacy records with only aggregate accessorial allowances continue to use the aggregate comparison.
+The AIP fuel tolerance and weight buffer are adjustable in the Streamlit sidebar. Fuel variances at or below the tolerance are accepted as rounding differences; amounts above it trigger an overcharge exception and are withheld. Other positive billed-minus-authorized variances are flagged and withheld, while underbilled lines remain favorable savings and do not offset overcharges on other lines. Itemized invoice accessorials are compared by code and amount with `purchase_orders.approved_accessorial_items`; unauthorized codes or amounts appear as actionable findings (for example, an unapproved `DET` detention charge). Migrated legacy records with only aggregate accessorial allowances continue to use the aggregate comparison.
 
 For live OpenAI dispute drafting, copy `.streamlit/secrets.toml.example` to `.streamlit/secrets.toml` and add your `OPENAI_API_KEY`. Use **Generate / Regenerate dispute memo** on a flagged invoice to request a draft; the selected reconciliation record and sender details from `data/company_profile.json` are supplied to OpenAI. Review the generated text before sending it. If the API key is missing or OpenAI is unavailable, the app displays “AI is currently down” and does not create a fallback letter. Generated sample carrier invoices include the company as the bill-to contact.
 
@@ -50,18 +50,16 @@ The AIP weekly diesel benchmarks are recorded in `src/reconciliation_engine.py` 
 ## Business rules
 
 - `base_variance = billed_base_freight - contracted_base_freight`.
-- `authorized_fuel_surcharge` is calculated from PO base freight and the shipment-week AIP index; `fuel_variance = authorized_fuel_surcharge - billed_fuel_surcharge`, so an overcharge is negative.
-- Fuel overcharges beyond the sidebar tolerance are classified as `DISCREPANCY_FLAGGED` with root cause `UNAUTHORIZED_FUEL_CREEP`; the full amount remains in the withheld/overbill calculation.
-- `accessorial_variance` sums per-code positive overages: billed amount less the PO allowance for that code. A code not listed on the PO has a zero allowance.
-- `total_overbill = max(0, base_variance - fuel_variance + accessorial_variance)`.
-- `approved_remittance = total_invoiced - disputed_amount`; the withheld amount is the reconciled overbill.
+- `authorized_fuel_surcharge` is calculated from PO base freight and the shipment-week AIP index; `fuel_variance = billed_fuel_surcharge - authorized_fuel_surcharge`, so an overcharge is positive.
+- Positive base and accessorial variances are overcharges. A fuel variance greater than the adjustable `AIP Fuel Tolerance ($ AUD)` is classified as `DISCREPANCY_FLAGGED` with root cause `UNAUTHORIZED_FUEL_CREEP`; values at or below the threshold are accepted as rounding differences.
+- `accessorial_variance` is billed minus authorized across accessorial lines; `accessorial_overcharge` sums only positive per-code differences. A code not listed on the PO has a zero allowance.
+- `disputed_variance` is the sum of positive base and accessorial overcharges plus fuel overcharges above tolerance. Favorable underbills do not reduce this amount.
+- `total_invoiced` is the sum of billed base freight, fuel, and accessorial line items; `approved_remittance = total_invoiced - disputed_amount`.
 - `variance_pct` uses `contracted_base_freight + authorized_fuel_surcharge + max_accessorial_allowance` as its denominator.
 - By default, a billed weight up to 2% above the dock scale weight passes the weight check; the workbench lets an auditor adjust the percentage. Higher overage is flagged, but weight has no invented dollar rate.
-- By default, fuel variances up to $1 are within tolerance. The workbench lets an auditor adjust the dollar tolerance; the reported overbill remains unchanged.
 - Missing receipts produce `REVIEW_INCOMPLETE` and cannot be touchlessly approved.
-- Complete records at or below 1% variance are `TOUCHLESS_APPROVED`.
-- Complete records above 5% variance, or beyond the weight tolerance, are `DISCREPANCY_FLAGGED`.
-- Other complete records are `REVIEW_REQUIRED`.
+- Complete records with no positive disputed variance and within the weight tolerance are `TOUCHLESS_APPROVED`, including underbilled loads and fuel differences within tolerance.
+- Any positive disputed variance is `DISCREPANCY_FLAGGED`. Weight-only exceptions are `REVIEW_REQUIRED`; weight differences do not create an invented dollar overcharge.
 
 The PO-1007 fixture retains the repository's existing invoice and scale values. For its $2,750 contracted base and $285 billed fuel, the $1.95/L default benchmark authorizes 4.5% ($123.75) under the specified 0.5%-per-step policy. CSV and Supabase source weight values retain their legacy pound-based field names; the user-facing reconciliation and voucher convert them to kilograms.
 
