@@ -19,8 +19,6 @@ from src.reconciliation_engine import (
     DISCREPANCY_FLAGGED,
     REVIEW_INCOMPLETE,
     REVIEW_REQUIRED,
-    STEP_INTERVAL,
-    STEP_PERCENTAGE,
     TOUCHLESS_APPROVED,
     UNAUTHORIZED_FUEL_CREEP,
     calculate_authorized_fuel,
@@ -740,33 +738,37 @@ def _render_fuel_audit_breakdown(
     fuel_overcharge = max(0.0, billed_fuel - authorization["authorized_amount"])
     parsed_date = pd.to_datetime(shipment_date, errors="coerce")
     week_start = parsed_date - pd.Timedelta(days=parsed_date.weekday())
-    index_week_label = (
-        f"Week of {week_start.strftime('%d %b %Y')}"
+    index_price_label = (
+        f"Price for Week of {week_start.strftime('%d %b %Y')}"
         if not pd.isna(parsed_date)
-        else "Shipment week unavailable"
+        else "Price for Shipment Week (unavailable)"
     )
 
-    with st.container(border=True):
+    with st.container(border=True, key="aip_fuel_audit_card"):
+        st.markdown(
+            """
+            <style>
+            .st-key-aip_fuel_audit_card [data-testid="stColumn"]
+            [data-testid="stVerticalBlock"] {
+                gap: 0.5rem;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
         st.markdown("#### AIP Diesel Fuel Surcharge Audit Breakdown")
-        details = st.columns([1.1, 1.1, 1.1, 1.5])
-        details[0].caption("AIP Weekly Diesel Price")
+        details = st.columns([1.1, 1.1, 1.5])
+        details[0].caption(index_price_label)
         details[0].markdown(
             f"**${authorization['index_price']:.2f} AUD / L**"
         )
-        details[0].caption(index_week_label)
         details[1].caption("Contract Base Peg")
         details[1].markdown(f"**${BASE_PEG_PRICE:.2f} AUD / L**")
-        details[1].caption(
-            f"+{STEP_PERCENTAGE:.1%} surcharge per {STEP_INTERVAL * 100:.0f}¢ step"
-        )
-        details[2].caption("Authorized Fuel Surcharge")
-        details[2].markdown(f"**{authorization['allowed_pct']:.2%}**")
-        details[2].caption(f"Steps: {authorization['steps']}")
-        details[3].markdown(
+        details[2].markdown(
             f"Billed: {billed_pct:.2%} "
             f"({_format_aud_money(billed_fuel)})"
         )
-        details[3].markdown(
+        details[2].markdown(
             f"Authorized: {authorization['allowed_pct']:.2%} "
             f"({_format_aud_money(authorization['authorized_amount'])})"
         )
@@ -774,15 +776,15 @@ def _render_fuel_audit_breakdown(
             billed_fuel, authorization["authorized_amount"]
         )
         if fuel_overcharge > fuel_tolerance:
-            details[3].error(f"Overcharge: {discrepancy} AUD")
+            details[2].error(f"Overcharge: {discrepancy} AUD")
         elif fuel_overcharge > 0:
-            details[3].caption(
+            details[2].caption(
                 f"Within AIP fuel tolerance: {discrepancy} AUD"
             )
         elif billed_fuel < authorization["authorized_amount"]:
-            details[3].caption(f"Favorable savings: {discrepancy} AUD")
+            details[2].caption(f"Favorable savings: {discrepancy} AUD")
         else:
-            details[3].caption(f"Variance: {discrepancy} AUD")
+            details[2].caption(f"Variance: {discrepancy} AUD")
 
 
 def _save_resolution(
@@ -1115,9 +1117,9 @@ def render_audit() -> None:
             withheld = _numeric_value(selected.get("disputed_amount")) or 0.0
             financial_summary[1].markdown(
                 "<div>"
-                "<div style=\"font-family:inherit;font-size:20px;"
+                "<div style=\"font-family:inherit;font-size:20px;line-height:normal;"
                 "color:#fafafa;font-weight:400\">Deductions Withheld</div>"
-                f"<div style=\"font-size:1.75rem;font-weight:600;"
+                f"<div style=\"font-size:20px;font-weight:400;margin-top:21px;line-height:normal;"
                 f"color:#e46b6b\">{_format_withheld_amount(withheld)}</div></div>",
                 unsafe_allow_html=True,
             )
