@@ -5,7 +5,6 @@ from __future__ import annotations
 import math
 from datetime import datetime, timezone
 from html import escape
-from pathlib import Path
 from numbers import Real
 
 import pandas as pd
@@ -24,7 +23,6 @@ from src.reconciliation_engine import (
     calculate_authorized_fuel,
     summarize_carrier_billing,
     summarize,
-    write_discrepancy_queue,
 )
 from src.supabase_data import (
     create_supabase_client,
@@ -35,7 +33,6 @@ from src.supabase_data import (
     update_invoice_audit,
 )
 
-PROJECT_ROOT = Path(__file__).resolve().parent
 OUTLOOK_FROM_EMAIL = "nadiaravindra07@outlook.com"
 LB_TO_KG = 0.45359237
 HANDLED_STATUSES = {
@@ -1445,19 +1442,5 @@ def render_audit() -> None:
                     )
                 else:
                     st.caption("No resolution events have been recorded.")
-
-    if st.button("Export discrepancy queue for Power Automate"):
-        try:
-            export_rows = exception_rows.copy()
-            export_rows["status"] = export_rows["reconciliation_status"]
-            queue = write_discrepancy_queue(
-                export_rows,
-                PROJECT_ROOT / "automation" / "discrepancy_queue.json",
-            )
-        except Exception as error:
-            st.error(f"Could not export the discrepancy queue: {error}")
-        else:
-            st.success(f"Exported {len(queue)} open exception(s).")
-
 
 render_audit()

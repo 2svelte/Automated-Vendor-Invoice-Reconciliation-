@@ -67,7 +67,7 @@ The deterministic engine owns all amounts and statuses. The AI layer only drafts
 
 ## Power Automate integration
 
-The dashboard exports exceptions to `automation/discrepancy_queue.json` using **Export discrepancy queue for Power Automate**. The queue contains invoice/PO identifiers, status, variance amounts, receipt state, and the `approve_overcharge` / `send_ai_dispute` actions. Invoice PDFs are watched separately in `data/inbound_outlook_invoices` while Streamlit is running.
+The Power Automate setup documents the discrepancy queue contract in `automation/discrepancy_queue.json`, including invoice/PO identifiers, status, variance amounts, receipt state, and the `approve_overcharge` / `send_ai_dispute` actions. The Streamlit dashboard does not provide a manual queue-export button. Invoice PDFs are watched separately in `data/inbound_outlook_invoices` while Streamlit is running.
 
 `automation/power_automate_flow_spec.json` documents the machine-readable trigger and routing contract. `automation/power_automate_flow_spec.md` provides exact Power Automate Desktop and cloud setup steps. `automation/teams_card_template.json` is the Adaptive Card payload contract. These files describe the integration; Power Automate execution requires deployment in the target Microsoft tenant.
 

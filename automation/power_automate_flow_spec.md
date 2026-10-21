@@ -85,9 +85,9 @@ The project demo defaults the `carrier_email` column on invoices, purchase order
 5. Add the approval/dispute branches described in `automation/power_automate_flow_spec.json`.
 6. Configure retry handling and move processed queue files to an archive folder so the same exception is not sent repeatedly.
 
-## Streamlit action
+## Queue contract
 
-In the dashboard, open **Workflow export** and select **Export Discrepancy Queue for Power Automate**. The app writes the complete current exception array to `automation/discrepancy_queue.json` and also offers a download for inspection. The queue includes `REVIEW_INCOMPLETE` records because missing proof of delivery requires operational review even when no monetary variance is available.
+The Streamlit dashboard does not provide a manual queue-export button. If deploying the discrepancy escalation flow, configure an authorized process to generate `automation/discrepancy_queue.json` using the schema in this runbook and `automation/power_automate_flow_spec.json`. Include `REVIEW_INCOMPLETE` records because missing proof of delivery requires operational review even when no monetary variance is available.
 
 ## Security and operational notes
 
