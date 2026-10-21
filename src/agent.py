@@ -140,15 +140,18 @@ Use this company profile document as the authoritative source for the sender's s
 {company_profile}
 
 Requirements:
+- Begin with the carrier salutation (for example, "Dear BlueLine Logistics,"); do not write an executive summary or any introductory paragraph before it.
 - Reference the invoice and PO.
 - Identify only the supplied positive overcharge line items and total withheld amount.
 - Do not dispute underbilled or exact-match line items.
 - Explicitly state the approved remittance and the amount short-paid.
 - Use the term "short-paid" and say the approved remittance is queued for payment.
+- Explain the discrepancy, disputed amount, and remittance once in the letter; do not repeat those details.
+- Do not include a subject line; this text is the email body and the email subject is provided separately.
 - Request a credit memo or supporting contractual documentation.
 - Sign the letter with the contact's name, position, company, and phone from the company profile document. Do not use placeholders.
+- End the memo with the signature; do not add any text after it.
 - Do not invent dates, rates, terms, evidence, or legal conclusions.
-- Include a two-sentence executive summary followed by the letter.
 - Format the result as plain text for an email. Do not use Markdown or include
   double-asterisk markers (**), including around headings.
 """
@@ -259,6 +262,26 @@ def draft_dispute(exception: dict[str, Any], api_key: str | None = None) -> str:
     content = response.choices[0].message.content
     if not content or not content.strip():
         raise RuntimeError("OpenAI returned an empty dispute letter.")
-    memo = f"{content.strip()}\n\n{short_pay_statement(exception)}"
-    fuel_line = fuel_dispute_line(exception)
-    return f"{memo}\n\n{fuel_line}" if fuel_line else memo
+    memo = content.strip()
+    lines = memo.splitlines()
+    salutation_line = next(
+        (
+            index
+            for index, line in enumerate(lines)
+            if line.strip().casefold().startswith("dear ")
+        ),
+        None,
+    )
+    if salutation_line is not None:
+        lines = lines[salutation_line:]
+    else:
+        first_content_line = next(
+            (index for index, line in enumerate(lines) if line.strip()),
+            None,
+        )
+        if (
+            first_content_line is not None
+            and lines[first_content_line].lstrip().casefold().startswith("subject:")
+        ):
+            del lines[first_content_line]
+    return "\n".join(lines).strip()

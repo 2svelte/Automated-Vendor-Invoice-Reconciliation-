@@ -45,13 +45,7 @@ def test_draft_uses_llm_and_returns_generated_text(monkeypatch):
 
     monkeypatch.setattr("openai.OpenAI", FakeOpenAI)
 
-    assert draft_dispute(exception_record(), api_key="test-key") == (
-        "AI-generated letter\n\n"
-        "We have approved and queued a remittance of $440.00 for payment under "
-        "PO-1. The remaining $60.00 has been short-paid due to base rate variance "
-        "($10.00) and fuel surcharge variance ($20.00) and unauthorized accessorial "
-        "variance ($30.00)."
-    )
+    assert draft_dispute(exception_record(), api_key="test-key") == "AI-generated letter"
     assert create_calls[0]["model"] == "gpt-4o-mini"
 
 
@@ -72,6 +66,66 @@ def test_draft_raises_when_llm_returns_empty_text(monkeypatch):
         draft_dispute(exception_record(), api_key="test-key")
 
 
+def test_draft_removes_generated_subject_line_from_email_body(monkeypatch):
+    response = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    content=(
+                        "\nSubject: Dispute of Invoice INV-1 - Fuel Surcharge Overcharge\n\n"
+                        "Dear Carrier,\n\nPlease review the disputed charge."
+                    )
+                )
+            )
+        ]
+    )
+
+    class FakeOpenAI:
+        def __init__(self, api_key):
+            self.chat = SimpleNamespace(
+                completions=SimpleNamespace(
+                    create=lambda **kwargs: response
+                )
+            )
+
+    monkeypatch.setattr("openai.OpenAI", FakeOpenAI)
+
+    assert draft_dispute(exception_record(), api_key="test-key") == (
+        "Dear Carrier,\n\nPlease review the disputed charge."
+    )
+
+
+def test_draft_starts_with_salutation_and_drops_generated_intro(monkeypatch):
+    response = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    content=(
+                        "This letter serves to formally dispute the invoice. "
+                        "The remittance has been queued.\n\n"
+                        "Dear BlueLine Logistics,\n\n"
+                        "We dispute the fuel surcharge on invoice INV-1."
+                    )
+                )
+            )
+        ]
+    )
+
+    class FakeOpenAI:
+        def __init__(self, api_key):
+            self.chat = SimpleNamespace(
+                completions=SimpleNamespace(create=lambda **kwargs: response)
+            )
+
+    monkeypatch.setattr("openai.OpenAI", FakeOpenAI)
+
+    memo = draft_dispute(exception_record(), api_key="test-key")
+
+    assert memo.startswith("Dear BlueLine Logistics,")
+    assert "This letter serves" not in memo
+    assert "The remittance has been queued" not in memo
+
+
 def test_prompt_requires_plain_text_without_markdown_bold_markers():
     prompt = _prompt(exception_record())
 
@@ -82,6 +136,10 @@ def test_prompt_requires_plain_text_without_markdown_bold_markers():
     assert "Nadia R." in prompt
     assert "0412345678" in prompt
     assert "short-paid" in prompt
+    assert "do not write an executive summary" in prompt
+    assert "Explain the discrepancy, disputed amount, and remittance once" in prompt
+    assert "Do not include a subject line" in prompt
+    assert "do not add any text after it" in prompt
 
 
 def test_prompt_only_includes_positive_overcharge_line_items():
@@ -215,9 +273,14 @@ def test_fuel_dispute_line_uses_verified_aip_values():
     )
 
 
-def test_generated_memo_appends_the_deterministic_fuel_dispute_line(monkeypatch):
+def test_generated_memo_does_not_append_after_signature(monkeypatch):
+    generated_letter = (
+        "We have approved and queued a remittance of $440.00 for payment under PO-1. "
+        "The remaining $60.00 has been short-paid due to fuel surcharge variance.\n\n"
+        "Sincerely,\n\nNadia R.\nAccounts Payable Manager\nABC Company\n0412345678"
+    )
     response = SimpleNamespace(
-        choices=[SimpleNamespace(message=SimpleNamespace(content="AI-generated letter"))]
+        choices=[SimpleNamespace(message=SimpleNamespace(content=generated_letter))]
     )
 
     class FakeOpenAI:
@@ -239,4 +302,7 @@ def test_generated_memo_appends_the_deterministic_fuel_dispute_line(monkeypatch)
 
     memo = draft_dispute(invoice, api_key="test-key")
 
-    assert memo.endswith(fuel_dispute_line(invoice))
+    assert memo == generated_letter
+    assert memo.endswith("0412345678")
+    assert memo.count("We have approved and queued") == 1
+    assert memo.count("Fuel surcharge disputed on") == 0
