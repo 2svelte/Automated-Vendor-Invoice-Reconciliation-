@@ -326,15 +326,6 @@ def _workbench_table_html(
             continue
 
         cells = []
-        status = str(row.get("Status", ""))
-        status_code = next(
-            (
-                code
-                for code, label in AUDIT_STATUS_LABELS.items()
-                if label == status
-            ),
-            status,
-        )
         for column, value in row.items():
             text = str(value)
             classes = []
@@ -342,11 +333,6 @@ def _workbench_table_html(
                 classes.append("status-cell")
             elif column == "Primary Root Cause":
                 classes.append("root-cause-cell")
-            elif column == "Receipt":
-                if text == "Missing":
-                    classes.append("receipt-missing")
-            elif column == "Total" and status_code == DISCREPANCY_FLAGGED:
-                classes.append("discrepancy-flagged")
             elif column == "Variance" and text.startswith("+"):
                 if str(row.get("Component", "")) == "Fuel Surcharge (AIP Weekly Index)":
                     classes.append("variance-fuel-overcharge")
@@ -407,10 +393,6 @@ def _workbench_table_html(
             }
             table.workbench-table .status-cell { text-align: left; }
             table.workbench-table .root-cause-cell { text-align: left; }
-            table.workbench-table .receipt-missing {
-              color: #fff; text-align: left; font-size: 14px;
-              font-weight: 600;
-            }
             table.workbench-table tr.table-tier-heading td {
               padding: 7px 8px; background: #202833; color: #d8e5f4;
               font-weight: 700; text-align: left; white-space: normal;
@@ -422,10 +404,6 @@ def _workbench_table_html(
             }
             .column-resizer:hover, .column-resizer:focus-visible {
               background: #60a5fa; outline: none;
-            }
-            table.workbench-table .receipt-missing { background: #c63b40; }
-            table.workbench-table .discrepancy-flagged {
-              background: #dc454b; color: #fff;               font-weight: 700; text-align: left;
             }
             table.workbench-table .variance-flagged {
               color: #fff; text-align: right;
@@ -1110,23 +1088,35 @@ def render_audit() -> None:
                 st.error("AIP Index Overcharge Detected")
             _render_fuel_audit_breakdown(selected, fuel_tolerance)
             financial_summary = st.columns(3)
-            financial_summary[0].metric(
-                "Total Invoiced Amount",
-                _format_aud_money(selected.get("total_invoiced")),
-            )
             withheld = _numeric_value(selected.get("disputed_amount")) or 0.0
-            financial_summary[1].markdown(
-                "<div>"
-                "<div style=\"font-family:inherit;font-size:20px;line-height:normal;"
-                "color:#fafafa;font-weight:400\">Deductions Withheld</div>"
-                f"<div style=\"font-size:20px;font-weight:400;margin-top:21px;line-height:normal;"
-                f"color:#e46b6b\">{_format_withheld_amount(withheld)}</div></div>",
-                unsafe_allow_html=True,
-            )
-            financial_summary[2].metric(
-                "Net Approved Remittance",
-                _format_aud_money(selected.get("approved_remittance")),
-            )
+            financial_items = [
+                (
+                    "Total Invoiced Amount",
+                    _format_aud_money(selected.get("total_invoiced")),
+                    "#fafafa",
+                ),
+                (
+                    "Deductions Withheld",
+                    _format_withheld_amount(withheld),
+                    "#e46b6b",
+                ),
+                (
+                    "Net Approved Remittance",
+                    _format_aud_money(selected.get("approved_remittance")),
+                    "#fafafa",
+                ),
+            ]
+            for column, (label, value, color) in zip(
+                financial_summary, financial_items, strict=True
+            ):
+                column.markdown(
+                    "<div>"
+                    f"<div style=\"font-family:inherit;font-size:20px;line-height:normal;"
+                    f"color:#fafafa;font-weight:400\">{escape(label)}</div>"
+                    f"<div style=\"font-size:20px;font-weight:400;margin-top:10.5px;"
+                    f"line-height:normal;color:{color}\">{escape(value)}</div></div>",
+                    unsafe_allow_html=True,
+                )
             rebuttal_sla = _rebuttal_sla(
                 selected.get("rebuttal_deadline"), selected.get("audit_status")
             )
@@ -1137,6 +1127,10 @@ def render_audit() -> None:
                 st.warning(f"Warehouse OS&D note: {osd_notes}")
 
             if not showing_history:
+                st.markdown(
+                    '<div style="height:24px"></div>',
+                    unsafe_allow_html=True,
+                )
                 st.markdown("#### Resolution")
                 audit_note = st.text_area(
                     "",

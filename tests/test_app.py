@@ -108,7 +108,7 @@ def test_duplicate_invoice_is_highlighted_in_queue() -> None:
     assert "localStorage.setItem(storageKey" in html
 
 
-def test_formatted_status_has_no_highlight_but_discrepancy_still_does() -> None:
+def test_discrepancy_status_does_not_highlight_total() -> None:
     table = pd.DataFrame(
         {
             "Status": ["Discrepancy Flagged"],
@@ -124,7 +124,8 @@ def test_formatted_status_has_no_highlight_but_discrepancy_still_does() -> None:
 
     assert 'class="status-cell"' in html
     assert "status-flagged" not in html
-    assert 'class="discrepancy-flagged"' in html
+    assert '<td title="$125.00">$125.00</td>' in html
+    assert "discrepancy-flagged" not in html
     assert (
         "table.workbench-table .status-cell,\n"
         "            table.workbench-table .root-cause-cell {"
@@ -133,13 +134,10 @@ def test_formatted_status_has_no_highlight_but_discrepancy_still_does() -> None:
     assert "font-weight: 400;" in html
     assert "table.workbench-table th {\n              position: relative; padding-right: 12px; background: #15191f;\n              color: #f1f3f5; font-weight: 600;" in html
     assert "table.workbench-table .status-cell { text-align: left; }" in html
-    assert (
-        "table.workbench-table .receipt-missing {\n"
-        "              color: #fff; text-align: left; font-size: 14px;"
-    ) in html
+    assert "receipt-missing" not in html
 
 
-def test_receipt_only_highlights_missing() -> None:
+def test_receipt_does_not_highlight_missing() -> None:
     table = pd.DataFrame({"Receipt": ["Found", "Missing"]})
 
     html = _workbench_table_html(
@@ -149,8 +147,9 @@ def test_receipt_only_highlights_missing() -> None:
     )
 
     assert '<td title="Found">Found</td>' in html
-    assert 'class="receipt-missing" title="Missing">Missing</td>' in html
+    assert '<td title="Missing">Missing</td>' in html
     assert "receipt-found" not in html
+    assert "receipt-missing" not in html
 
 
 def test_grouped_header_spans_discrepancy_columns() -> None:
