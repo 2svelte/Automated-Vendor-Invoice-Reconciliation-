@@ -1203,14 +1203,20 @@ def render_audit() -> None:
                                 selected.to_dict(),
                                 api_key=_openai_api_key(),
                             )
-                        except Exception:
+                        except Exception as exc:
                             st.session_state[unavailable_key] = True
+                            st.session_state[f"{unavailable_key}_reason"] = (
+                                f"{type(exc).__name__}: {exc}"
+                            )
                         else:
                             st.session_state[memo_key] = memo
 
                 memo = st.session_state.get(memo_key)
                 if st.session_state.get(unavailable_key, False):
                     st.error("AI is currently down. Please try again later.")
+                    reason = st.session_state.get(f"{unavailable_key}_reason")
+                    if reason:
+                        st.caption(f"Details: {reason[:300]}")
                 elif memo:
                     st.caption(
                         "Generated draft. Review it for accuracy before sending."
