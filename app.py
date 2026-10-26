@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import os
 from datetime import datetime, timezone
 from html import escape
 from numbers import Real
@@ -62,6 +63,15 @@ AUDIT_STATUS_LABELS = {
 @st.cache_resource
 def get_supabase_client():
     return create_supabase_client()
+
+
+def _openai_api_key() -> str | None:
+    """Prefer Streamlit secrets; fall back to the environment (.env locally)."""
+    try:
+        key = st.secrets.get("OPENAI_API_KEY")
+    except Exception:
+        key = None
+    return key or os.getenv("OPENAI_API_KEY")
 
 
 def _numeric_value(value: object) -> float | None:
@@ -1191,7 +1201,7 @@ def render_audit() -> None:
                         try:
                             memo = draft_dispute(
                                 selected.to_dict(),
-                                api_key=st.secrets.get("OPENAI_API_KEY"),
+                                api_key=_openai_api_key(),
                             )
                         except Exception:
                             st.session_state[unavailable_key] = True
