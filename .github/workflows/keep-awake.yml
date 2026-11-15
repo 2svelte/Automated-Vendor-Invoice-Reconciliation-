@@ -28,7 +28,7 @@ jobs:
           with sync_playwright() as p:
               browser = p.chromium.launch()
               page = browser.new_page()
-              page.goto('https://automated-demand-planner.streamlit.app/', timeout=60000)
+              page.goto('https://freight-audit-reconciliation.streamlit.app/', timeout=60000)
               page.wait_for_timeout(15000)
               # Click the 'Yes, get this app back up!' button if it happens to be asleep
               wake_button = page.locator('button:has-text(\"Yes, get this app back up!\")')
